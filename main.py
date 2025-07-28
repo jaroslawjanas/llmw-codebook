@@ -20,7 +20,7 @@ def main():
     parser.add_argument("--max-tokens", type=int, default=304, help="Maximum tokens to generate")
     parser.add_argument("--green-fraction", type=float, default=0.5, help="Fraction of tokens in green list")
     parser.add_argument("--bias", type=float, default=6.0, help="Bias to add to green/red tokens")
-    parser.add_argument("--n", type=int, default=8, help="Size of the field and the code table")
+    parser.add_argument("--n", type=int, default=8, help="Size of the code table")
     parser.add_argument("--u", type=int, default=100, help="Size of the codes")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--prompt", type=str, help="Custom prompt (uses random essay from dataset if not provided)")
@@ -152,6 +152,10 @@ def main():
     }
     
     stats_df = pd.DataFrame(index=range(total_prompts), columns=columns)
+
+    #----------------------------------------#
+    #              Watermarkign              #
+    #----------------------------------------#
 
     for prompt_idx, prompt in enumerate(prompts, 0):
         if total_prompts > 1:
