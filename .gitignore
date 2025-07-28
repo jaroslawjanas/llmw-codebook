@@ -1,0 +1,29 @@
+# Model cache directory
+cache/
+
+# Output directory
+output/
+
+# Console logs
+logs/
+
+# Scripts output directory
+scripts/output/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# HuggingFace token file
+hf_token
+
+# Exclude unison profile files
+*.prf
+
+# https://docs.cline.bot/prompting/cline-memory-bank
+# AI Memory bank
+memory-bank/
+
+# Experiment utomation files
+*.sh
+*bat

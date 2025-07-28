@@ -1,0 +1,6 @@
+hf_your_huggingface_token_here
+
+# Replace this with your HuggingFace API token
+# You can create a token at: https://huggingface.co/settings/tokens
+# After replacing, rename this file to "hf_token"
+# DO NOT commit hf_token to git (it's in .gitignore)
