@@ -488,7 +488,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
 
                 # Add the new token to generated ids
                 all_ids.append(next_token_id)
-                block_info['tokens'].append(next_token_id)
+                block_info["tokens"].append(next_token_id)
                 tokens_generated += 1
                 
                 # Update progress bar with stats
@@ -525,12 +525,12 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         
         # Create statistics dictionary
         statistics = {
-            'green_tokens': self.green_tokens_selected,
-            'red_tokens': self.red_tokens_selected,
-            'blocks_encoded': self.blocks_encoded,
-            'total_tokens_generated': tokens_generated,
-            'green_ratio': self.green_tokens_selected / (self.green_tokens_selected + self.red_tokens_selected + 1e-10),
-            'properly_encoded_tokens': self.properly_encoded_tokens
+            "green_tokens": self.green_tokens_selected,
+            "red_tokens": self.red_tokens_selected,
+            "blocks_encoded": self.blocks_encoded,
+            "total_tokens_generated": tokens_generated,
+            "green_ratio": self.green_tokens_selected / (self.green_tokens_selected + self.red_tokens_selected + 1e-10),
+            "properly_encoded_tokens": self.properly_encoded_tokens
         }
 
         return full_text, generated_text, generated_ids, formatted_prompt, statistics, watermark_blocks_info
@@ -648,9 +648,9 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             
             # Store the extracted block information with lists for error correction variants
             blocks.append({
-                'x': int(x),
-                'y_bits': [y_bits],  # List of y_bits variants (initially just original)
-                'y': [int(y_gf)]     # List of y values (initially just original)
+                "x": int(x),
+                "y_bits": [y_bits],  # List of y_bits variants (initially just original)
+                "y": [int(y_gf)]     # List of y values (initially just original)
             })
             progress_bar.update(1)
         

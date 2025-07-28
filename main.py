@@ -134,21 +134,21 @@ def main():
     
     # Initialize DataFrame with all required columns
     columns = [
-        'field_size', 'prompt', 'generated_text', 'tokens_length', 'secret_key', 'properly_encoded_tokens',
-        'watermark_recovered', 'encoding_time', 'decoding_time'
+        "field_size", "prompt", "generated_text", "tokens_length", "secret_key", "properly_encoded_tokens",
+        "watermark_recovered", "encoding_time", "decoding_time"
     ]
     
     # Define explicit column types for proper data handling
     column_dtypes = {
-        'field_size': 'int64',
-        'prompt': 'string',
-        'generated_text': 'string', 
-        'tokens_length': 'int64',
-        'secret_key': 'string',
-        'properly_encoded_tokens': 'int64',
-        'watermark_recovered': 'boolean',
-        'encoding_time': 'float64',
-        'decoding_time': 'float64'
+        "field_size": "int64",
+        "prompt": "string",
+        "generated_text": "string", 
+        "tokens_length": "int64",
+        "secret_key": "string",
+        "properly_encoded_tokens": "int64",
+        "watermark_recovered": "boolean",
+        "encoding_time": "float64",
+        "decoding_time": "float64"
     }
     
     stats_df = pd.DataFrame(index=range(total_prompts), columns=columns)
