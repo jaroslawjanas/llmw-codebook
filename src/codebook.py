@@ -8,61 +8,78 @@ import os
 import hashlib
 import pandas as pd
 import numpy as np
-from typing import List
+from typing import List, Tuple
 import src.paths as paths
 
 
-class CodebookGenerator:
+class CodebookManager:
     """
     Generates and manages codebook tables for watermarking.
     Each table maps watermark identities to u-bit codes using a pseudo-random function.
     """
     
     def __init__(self, n: int, u: int, secret_key: str, seed: int = 42):
-        """Initialize the codebook generator"""
+        """Initialize the codebook manager and load/generate the codebook arrays."""
         self.n = n
         self.u = u
         self.secret_key = secret_key
         self.seed = seed
 
         self.filename_base = self._get_filename_base(n, u, secret_key, seed)
-        self.parquet_path = os.path.join(paths.CODEBOOKS_CACHE_DIR, f"{self.filename_base}.parquet")
-        self.csv_path = os.path.join(paths.CODEBOOKS_CACHE_DIR, f"{self.filename_base}.csv")
+        self.npz_path = os.path.join(paths.CODEBOOKS_CACHE_DIR, f"{self.filename_base}.npz")
+        
+        # Load or generate the codebook arrays directly
+        self.bit_codes, self.watermark_identities = self._load_or_generate_arrays()
     
-    def get_codebook(self) -> pd.DataFrame:
+    def _load_or_generate_arrays(self) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Generate a codebook table or load existing one from cache.
-            
+        Load existing codebook arrays or generate new ones.
+        
         Returns:
-            pandas DataFrame with columns ['watermark_identity', 'bit_code']
+            Tuple of (bit_codes_2d_array, watermark_identities_array)
         """
-        # Check if cached parquet version exists (fast loading)
-        if os.path.exists(self.parquet_path):
-            print(f"Loading existing codebook from: {self.parquet_path}")
-            df = pd.read_parquet(self.parquet_path)
-            # Convert bit_code arrays back to lists
-            df['bit_code'] = df['bit_code'].apply(lambda x: x.tolist() if hasattr(x, 'tolist') else list(x))
-            return df
+        # Check if cached NPZ file exists
+        if os.path.exists(self.npz_path):
+            print(f"Loading existing codebook from: {self.npz_path}")
+            data = np.load(self.npz_path)
+            bit_codes = data['bit_codes']
+            watermark_identities = data['watermark_identities']
+            print(f"Loaded codebook with {len(bit_codes)} entries, {bit_codes.shape[1]} bits each")
+            return bit_codes, watermark_identities
         
-        # Generate new table
+        # Generate new arrays
         print(f"Generating new codebook: {self.filename_base}")
-        table = self._generate_table(self.n, self.u, self.secret_key, self.seed)
+        bit_codes, watermark_identities = self._generate_arrays()
         
-        # Save to cache as parquet (fast loading)
-        df_to_save = table.copy()
-        # Convert bit lists to numpy arrays for efficient storage
-        df_to_save['bit_code'] = df_to_save['bit_code'].apply(np.array)
-        df_to_save.to_parquet(self.parquet_path, index=False)
+        # Save to NPZ cache with compression
+        np.savez_compressed(self.npz_path, 
+                          bit_codes=bit_codes, 
+                          watermark_identities=watermark_identities)
+        print(f"Saved codebook to: {self.npz_path}")
         
-        # Also save as CSV for human readability
-        df_csv = table.copy()
-        df_csv['bit_code'] = df_csv['bit_code'].apply(self._bit_list_to_string)
-        df_csv.to_csv(self.csv_path, index=False)
+        return bit_codes, watermark_identities
+    
+    def _generate_arrays(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Generate the codebook arrays directly without DataFrame overhead.
         
-        print(f"Saved codebook to: {self.parquet_path} (fast loading)")
-        print(f"Saved human-readable copy to: {self.csv_path}")
+        Returns:
+            Tuple of (bit_codes_2d_array, watermark_identities_array)
+        """
+        # Calculate table size
+        table_size = 2 ** self.n
+        print(f"Generating codebook with {table_size} entries...")
         
-        return table
+        # Generate watermark identities (0 to 2^n - 1) with int64 dtype
+        watermark_identities = np.arange(table_size, dtype=np.int64)
+        
+        # Pre-allocate bit codes array
+        bit_codes = np.zeros((table_size, self.u), dtype=np.uint8)
+        
+        # Generate bit codes using vectorized operations
+        self._generate_bit_codes_vectorized(watermark_identities, bit_codes)
+        
+        return bit_codes, watermark_identities
     
     def _get_filename_base(self, n: int, u: int, secret_key: str, seed: int) -> str:
         """
@@ -81,112 +98,106 @@ class CodebookGenerator:
         secret_hash = hashlib.md5(secret_key.encode()).hexdigest()[:8]
         return f"codebook_n{n}_u{u}_sk_{secret_hash}_s_{seed}"
     
-    def _generate_table(self, n: int, u: int, secret_key: str, seed: int) -> pd.DataFrame:
+    def _generate_bit_codes_vectorized(self, identities: np.ndarray, bit_codes: np.ndarray) -> None:
         """
-        Generate the codebook table with 2^n rows.
+        Generate bit codes for all identities using vectorized operations.
         
         Args:
-            n: Field size parameter - table will have 2^n rows
-            u: Bit code length - each code will be u bits long
-            secret_key: Secret key for pseudo-random function
+            identities: Array of watermark identities
+            bit_codes: Pre-allocated array to store bit codes
+        """
+        # Fix hash collision issue - ensure positive seed
+        base_seed = abs(hash(self.secret_key)) % (2**31)
+        
+        for i, identity in enumerate(identities):
+            # Create deterministic seed for this identity
+            identity_seed = (base_seed + identity) % (2**31)
+            rng = np.random.RandomState(identity_seed)
+            
+            # Generate u random bits directly
+            bit_codes[i] = rng.randint(0, 2, size=self.u, dtype=np.uint8)
+    
+    def get_random_row(self, seed: int) -> Tuple[np.ndarray, int]:
+        """
+        Get a random watermark identity and its corresponding bit code using a seeded RNG.
+        
+        Args:
             seed: Random seed for reproducibility
             
         Returns:
-            pandas DataFrame with columns ['watermark_identity', 'bit_code']
+            Tuple of (bit_code, watermark_identity)
         """
-        # Create a random generator with the specified seed
-        # Might prove useful if this were to be changed to a different approach
-        # rng = np.random.default_rng(seed)
+        # Create a seeded random number generator
+        rng = np.random.default_rng(seed)
         
-        # Calculate table size
-        table_size = 2 ** n
-        print(f"Generating codebook with {table_size} entries...")
+        # Generate a random watermark identity within the valid range [0, 2^n - 1]
+        watermark_identity = rng.randint(0, 2 ** self.n)
         
-        # Generate watermark identities (0 to 2^n - 1)
-        watermark_identities = list(range(table_size))
+        # Get the corresponding bit code directly from the array
+        bit_code = self.bit_codes[watermark_identity]
         
-        # Generate bit codes using pseudo-random function
-        bit_codes = []
-        for identity in watermark_identities:
-            bit_code = self._generate_bit_code(identity)
-            bit_codes.append(bit_code)
-        
-        # Create DataFrame
-        df = pd.DataFrame({
-            'watermark_identity': watermark_identities,
-            'bit_code': bit_codes
-        })
-        
-        return df
+        return bit_code, watermark_identity
     
-    def _generate_bit_code(self, identity: int) -> List[int]:
+    def _calculate_hamming_distance_vectorized(self, target_code: np.ndarray, all_codes: np.ndarray) -> np.ndarray:
         """
-        Generate u-bit code for given identity using pseudo-random function.
+        Calculate Hamming distances between target code and all codes using vectorization.
         
         Args:
-            identity: Watermark identity (0 to 2^n - 1)
+            target_code: Target bit code as numpy array
+            all_codes: All bit codes as 2D numpy array (n_codes, u_bits)
             
         Returns:
-            List of u bits (0s and 1s)
+            Array of Hamming distances
         """
-        # Create hash input combining secret key and identity
-        hash_input = f"{self.secret_key}-{identity}"
-        hash_object = hashlib.sha256(hash_input.encode())
-        hash_bytes = hash_object.digest()
-        
-        # Convert hash bytes to bits
-        bit_code = []
-        for i in range(self.u):
-            # Use different bytes for different bits to maximize randomness
-            byte_index = i // 8
-            bit_index = i % 8
-            
-            # If we need more bytes than available, cycle through the hash
-            if byte_index >= len(hash_bytes):
-                byte_index = byte_index % len(hash_bytes)
-            
-            # Extract bit from byte
-            byte_val = hash_bytes[byte_index]
-            bit_val = (byte_val >> bit_index) & 1
-            bit_code.append(bit_val)
-        
-        return bit_code
+        # Vectorized XOR and sum
+        return np.sum(target_code != all_codes, axis=1)
     
-    def _bit_list_to_string(self, bit_list: List[int]) -> str:
+    def find_closest_matches(self, target_bit_code: List[int], top: int = 1) -> List[Tuple[np.ndarray, int, int]]:
         """
-        Convert bit list to string representation for CSV storage.
+        Find the closest matching bit codes in the codebook based on Hamming distance.
         
         Args:
-            bit_list: List of bits
+            target_bit_code: The bit code to search for
+            top: Number of closest matches to return (default: 1)
             
         Returns:
-            String representation
+            List of tuples (bit_code, watermark_identity, hamming_distance) sorted by distance
+            
+        Raises:
+            ValueError: If target_bit_code has wrong length, contains invalid values, or top is invalid
         """
-        return ''.join(map(str, bit_list))
-
-
-# Example usage function
-def generate_standard_codebook():
-    """
-    Generate a standard codebook for common parameters.
-    """
-    # Example: Generate codebook with n=4 (16 entries) and u=8-bit codes
-    n = 16
-    u = 100
-    secret_key = "42"
-    seed = 42
-    
-    generator = CodebookGenerator(n, u, secret_key, seed)
-    table = generator.get_codebook()
-    
-    print(f"Generated codebook with {len(table)} entries")
-    print(f"First 5 rows:")
-    print(table.head())
-    print(f"Sample bit code: {table.iloc[0]['bit_code']}")
-    
-    return table
-
-
-if __name__ == "__main__":
-    # Test the codebook generation
-    generate_standard_codebook()
+        # Input validation
+        if len(target_bit_code) != self.u:
+            raise ValueError(f"Target bit code length ({len(target_bit_code)}) must match codebook bit length ({self.u})")
+        
+        if not all(bit in [0, 1] for bit in target_bit_code):
+            raise ValueError("Target bit code must contain only 0s and 1s")
+        
+        if top <= 0:
+            raise ValueError("Parameter 'top' must be a positive integer")
+        
+        if len(self.bit_codes) == 0:
+            raise ValueError("Codebook is empty")
+        
+        # Convert target to numpy array for vectorized operations
+        target_array = np.array(target_bit_code, dtype=np.uint8)
+        
+        # Calculate all distances at once using vectorization
+        distances = self._calculate_hamming_distance_vectorized(target_array, self.bit_codes)
+        
+        # Use different strategies based on top value
+        if top == 1:
+            # Early termination for single result - find minimum directly
+            min_idx = np.argmin(distances)
+            min_distance = distances[min_idx]
+            return [(self.bit_codes[min_idx], self.watermark_identities[min_idx], min_distance)]
+        
+        else:
+            # Use partial sorting for efficiency when top << total_entries
+            # argpartition: O(n) - partitions array so first 'top' elements are smallest (unsorted)
+            top_indices = np.argpartition(distances, top)[:top]
+            # argsort: O(k log k) - sort only the top k elements by their distance values
+            top_indices = top_indices[np.argsort(distances[top_indices])]
+            
+            return [(self.bit_codes[idx], self.watermark_identities[idx], distances[idx]) 
+                   for idx in top_indices]
