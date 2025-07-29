@@ -25,7 +25,7 @@ class CodebookManager:
         self.secret_key = secret_key
         self.seed = seed
 
-        self.filename_base = self._get_filename_base(n, u, secret_key, seed)
+        self.filename_base = self._get_filename_base()
         self.npz_path = os.path.join(paths.CODEBOOKS_CACHE_DIR, f"{self.filename_base}.npz")
         
         # Load or generate the codebook arrays directly
@@ -52,9 +52,11 @@ class CodebookManager:
         bit_codes, watermark_identities = self._generate_arrays()
         
         # Save to NPZ cache with compression
-        np.savez_compressed(self.npz_path, 
-                          bit_codes=bit_codes, 
-                          watermark_identities=watermark_identities)
+        np.savez_compressed(
+            self.npz_path, 
+            bit_codes=bit_codes, 
+            watermark_identities=watermark_identities
+        )
         print(f"Saved codebook to: {self.npz_path}")
         
         return bit_codes, watermark_identities
@@ -73,49 +75,44 @@ class CodebookManager:
         # Generate watermark identities (0 to 2^n - 1) with int64 dtype
         watermark_identities = np.arange(table_size, dtype=np.int64)
         
-        # Pre-allocate bit codes array
-        bit_codes = np.zeros((table_size, self.u), dtype=np.uint8)
-        
         # Generate bit codes using vectorized operations
-        self._generate_bit_codes_vectorized(watermark_identities, bit_codes)
+        bit_codes = self._generate_bit_codes_vectorized(watermark_identities)
         
         return bit_codes, watermark_identities
     
-    def _get_filename_base(self, n: int, u: int, secret_key: str, seed: int) -> str:
+    def _get_filename_base(self) -> str:
         """
         Generate standardized filename base based on parameters.
         
-        Args:
-            n: Field size parameter
-            u: Bit code length
-            secret_key: Secret key
-            seed: Random seed
-            
         Returns:
             Filename base string
         """
-        # Create a short hash of the secret key for filename
-        secret_hash = hashlib.md5(secret_key.encode()).hexdigest()[:8]
-        return f"codebook_n{n}_u{u}_sk_{secret_hash}_s_{seed}"
+        return f"codebook_n{self.n}_u{self.u}_sk_{self.secret_key}_s_{self.seed}"
     
-    def _generate_bit_codes_vectorized(self, identities: np.ndarray, bit_codes: np.ndarray) -> None:
+    def _generate_bit_codes_vectorized(self, identities: np.ndarray) -> np.ndarray:
         """
         Generate bit codes for all identities using vectorized operations.
         
         Args:
             identities: Array of watermark identities
-            bit_codes: Pre-allocated array to store bit codes
+            
+        Returns:
+            2D numpy array of bit codes (n_identities, u_bits)
         """
-        # Fix hash collision issue - ensure positive seed
-        base_seed = abs(hash(self.secret_key)) % (2**31)
+        # Create bit codes array
+        bit_codes = np.zeros((len(identities), self.u), dtype=np.uint8)
+        
+        base_seed = (hash(self.secret_key) + self.seed)
         
         for i, identity in enumerate(identities):
             # Create deterministic seed for this identity
-            identity_seed = (base_seed + identity) % (2**31)
-            rng = np.random.RandomState(identity_seed)
+            identity_seed = (base_seed + identity)
+            rng = np.random.default_rng(identity_seed)
             
             # Generate u random bits directly
             bit_codes[i] = rng.randint(0, 2, size=self.u, dtype=np.uint8)
+        
+        return bit_codes
     
     def get_random_row(self, seed: int) -> Tuple[np.ndarray, int]:
         """
@@ -149,7 +146,7 @@ class CodebookManager:
         Returns:
             Array of Hamming distances
         """
-        # Vectorized XOR and sum
+        # Vectorized comparison and sum - count differing bits
         return np.sum(target_code != all_codes, axis=1)
     
     def find_closest_matches(self, target_bit_code: List[int], top: int = 1) -> List[Tuple[np.ndarray, int, int]]:
