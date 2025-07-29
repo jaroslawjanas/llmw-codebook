@@ -11,6 +11,7 @@ from datetime import datetime
 import src.paths as paths
 from src.utils import get_shuffled_essays
 from src.llm_watermark import LLMWatermarkEncoder, LLMWatermarkDecoder, MCPSolver
+from src.codebook import CodebookManager
 from tqdm import tqdm
 
 
@@ -20,7 +21,7 @@ def main():
     parser.add_argument("--max-tokens", type=int, default=304, help="Maximum tokens to generate")
     parser.add_argument("--green-fraction", type=float, default=0.5, help="Fraction of tokens in green list")
     parser.add_argument("--bias", type=float, default=6.0, help="Bias to add to green/red tokens")
-    parser.add_argument("--n", type=int, default=8, help="Size of the code table")
+    parser.add_argument("--n", type=int, default=16, help="Size of the code table")
     parser.add_argument("--u", type=int, default=100, help="Size of the codes")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--prompt", type=str, help="Custom prompt (uses random essay from dataset if not provided)")
@@ -70,19 +71,6 @@ def main():
     secret_key = f"{secret_key_int:016x}"  # Format as 16-character hex string
     if args.verbose:
         print(f"Generated seed based 64-bit secret key: {secret_key}\n")
-    
-    # Create watermarker instance
-    watermarker = LLMWatermarkEncoder(
-        model_name=args.model,
-        green_list_fraction=args.green_fraction,
-        bias=args.bias,
-        seed=args.seed,
-        device=device,
-        context_window=args.context_window,
-        temperature=args.temperature,
-        hash_window=args.hash_window,
-        verbose=args.verbose
-    )
 
     # Get dataset info
     dataset_name = args.dataset[0]
@@ -154,10 +142,38 @@ def main():
     stats_df = pd.DataFrame(index=range(total_prompts), columns=columns)
 
     #----------------------------------------#
-    #              Watermarkign              #
+    #              Watermarking              #
     #----------------------------------------#
 
+    # Create watermarker instance
+    watermarker = LLMWatermarkEncoder(
+        model_name=args.model,
+        n=args.n,
+        u=args.u,
+        secret_key=secret_key,
+        green_list_fraction=args.green_fraction,
+        bias=args.bias,
+        seed=args.seed,
+        device=device,
+        context_window=args.context_window,
+        temperature=args.temperature,
+        hash_window=args.hash_window,
+        verbose=args.verbose
+    )
+
+    codebook = CodebookManager(
+        n=args.n,
+        u=args.u,
+        secret_key=args.secret_key,
+        seed=args.seed
+    )
+
+
+
     for prompt_idx, prompt in enumerate(prompts, 0):
+
+        bit_code, watermark_identity = codebook.get_random_row(args.seed + prompt_idx)
+
         if total_prompts > 1:
             print(f"\n{'='*60}")
             print(f"Processing Prompt {prompt_idx+1}/{total_prompts}")
@@ -175,6 +191,7 @@ def main():
         encoding_start = time.time()
         full_text, generated_text, generated_ids, formatted_prompt, generation_statistics, watermark_blocks_info = watermarker.generate_text(
             prompt=prompt,
+            bit_code=bit_code,
             max_new_tokens=args.max_tokens,
             verbose=args.verbose
         )

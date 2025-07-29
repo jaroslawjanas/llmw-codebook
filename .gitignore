@@ -27,3 +27,6 @@ memory-bank/
 # Experiment utomation files
 *.sh
 *bat
+
+# VSCode
+.vscode/

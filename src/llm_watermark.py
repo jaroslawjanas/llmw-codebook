@@ -35,8 +35,10 @@ class LLMWatermarkerBase(ABC):
         self,
         model_name: str,
         secret_key: str,
+        n: int,
+        u: int,
         green_list_fraction: float = 0.5,
-        seed: int = 4242,
+        seed: int = 42,
         cache_dir: str = paths.CACHE_DIR,
         device: Optional[str] = "cpu",
         verbose: bool = False,
@@ -57,6 +59,8 @@ class LLMWatermarkerBase(ABC):
         """
         self.model_name = model_name
         self.secret_key = secret_key
+        self.n = n
+        self.u = u
         self.green_list_fraction = green_list_fraction
         self.seed = seed
         self.cache_dir = cache_dir
@@ -139,6 +143,8 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         self,
         model_name: str,
         secret_key: str,
+        n: int,
+        u: int,
         green_list_fraction: float = 0.5,
         bias: float = 6.0,
         seed: int = 42,
@@ -155,6 +161,8 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         Args:
             model_name: HuggingFace model identifier
             secret_key: Secret key for watermarking
+            n:
+            u:
             green_list_fraction: Fraction of tokens to include in green list (default: 0.5)
             bias: Logit bias to apply to green tokens (default: 6.0)
             seed: Random seed for reproducibility
@@ -165,7 +173,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
             hash_window: Number of previous tokens to hash together (default: 1)
         """
         # Initialize base class
-        super().__init__(model_name, secret_key, green_list_fraction, seed, cache_dir, device, verbose)
+        super().__init__(model_name, secret_key, n, u, green_list_fraction, seed, cache_dir, device, verbose)
         
         # Encoder-specific parameters
         self.bias = bias
@@ -317,8 +325,9 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         
     def generate_text(
         self, 
-        prompt: str, 
-        max_new_tokens: int = 100, 
+        prompt: str,
+        bit_code: List[int],
+        max_new_tokens: int, 
         verbose: bool = True
     ) -> Tuple[str, str, List[int], str, Dict[str, int], List[int]]:
         """
@@ -333,11 +342,6 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
             Tuple of (full_text, generated_text, generated_ids, formatted_prompt, statistics, watermark_blocks_info)
         """
 
-        # Reset counters
-        self.green_tokens_selected = 0
-        self.red_tokens_selected = 0
-        self.blocks_encoded = 0
-        self.properly_encoded_tokens = 0
 
         # Initialize tracking for watermark blocks
         watermark_blocks_info = []
@@ -354,50 +358,37 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         # Initialize K/V cache
         past_key_values = None
         cache_position = 0  # Track position in the cache
+
+        assert len(bit_code) == self.u
         
         # Calculate number of complete blocks we can generate
-        if max_new_tokens % self.n != 0:
-            raise ValueError(f"max_new_tokens ({max_new_tokens}) must be divisible by n ({self.n}) to ensure complete blocks.")
-        num_blocks = max_new_tokens // self.n
+        if max_new_tokens % self.u != 0:
+            raise ValueError(f"max_new_tokens ({max_new_tokens}) must be divisible by 'u' ({self.u}) to encode the bit-code blocks.")
+        num_blocks = max_new_tokens // self.u
         if num_blocks == 0:
-            raise ValueError(f"max_new_tokens ({max_new_tokens}) must be at least n ({self.n}) to generate at least one block.")
+            raise ValueError(f"max_new_tokens ({max_new_tokens}) must be at least 'u' ({self.u}) to generate at least one bit-code block.")
         
         # Setup progress tracking
         progress_bar = tqdm(range(max_new_tokens))
         tokens_generated = 0
+        green_tokens_selected = 0
+        red_tokens_selected = 0
+        blocks_encoded = 0
+        properly_encoded_tokens = 0
         
         # Generate tokens block by block
         for block_idx in range(num_blocks):
-            # At the start of each block, determine the token to use for x-coordinate computation
-            if len(all_ids) > len(input_ids[0]):
-                # Use the last generated token for subsequent blocks
-                previous_token_id = all_ids[-1]
-            else:
-                # Use 0 for the very first block instead of last prompt token
-                # This is because when running detection we do not have access to the prompt
-                previous_token_id = 0
-            
-            # Compute x-coordinate for this block
-            x = self._hash_to_gf_element(previous_token_id, self.secret_key)
-            
-            # Compute y = f(x) using the line function
-            y = self.line_fnc(x)
-            
-            # Convert y to binary representation
-            y_bits = self._gf_to_binary(y)
-            
+
             # Track this block
             block_info = {
                 "block_idx": block_idx,
-                "x": int(x),
-                "y": int(y),
-                "y_bits": y_bits.copy(),
+                "bit_code": bit_code,
                 "encoded_bits": [],
                 "tokens": []
             }
             
             # Generate n tokens for this block (one for each bit of y)
-            for bit_idx in range(self.n):
+            for bit_idx in range(self.u):
                 # Prepare input for the model
                 if past_key_values is None:
                     # First generation - use the full prompt
@@ -431,7 +422,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
                     cache_position += model_input_ids.shape[1]  # Update position
                 
                 # Determine bias type based on current bit
-                current_bit = y_bits[bit_idx]
+                current_bit = bit_code[bit_idx]
                 bias_type = "green" if current_bit == 1 else "red"
                 
                 # For vocabulary splitting - use token_id = 0 for very first token, otherwise use previous generated token
@@ -492,7 +483,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
                 tokens_generated += 1
                 
                 # Update progress bar with stats
-                progress_bar.set_description(f"Encoding Block {block_idx+1}/{num_blocks}, Bit {bit_idx+1}/{self.n}, Green: {self.green_tokens_selected}, Red: {self.red_tokens_selected}")
+                progress_bar.set_description(f"Encoding Block {block_idx+1}/{num_blocks}, Bit {bit_idx+1}/{self.u}, Green: {self.green_tokens_selected}, Red: {self.red_tokens_selected}")
                 progress_bar.update(1)
                 
                 # Check if we've reached an EOS token
@@ -525,12 +516,12 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         
         # Create statistics dictionary
         statistics = {
-            "green_tokens": self.green_tokens_selected,
-            "red_tokens": self.red_tokens_selected,
-            "blocks_encoded": self.blocks_encoded,
+            "green_tokens": green_tokens_selected,
+            "red_tokens": red_tokens_selected,
+            "blocks_encoded": blocks_encoded,
             "total_tokens_generated": tokens_generated,
-            "green_ratio": self.green_tokens_selected / (self.green_tokens_selected + self.red_tokens_selected + 1e-10),
-            "properly_encoded_tokens": self.properly_encoded_tokens
+            "green_ratio": green_tokens_selected / (green_tokens_selected + red_tokens_selected + 1e-10),
+            "properly_encoded_tokens": properly_encoded_tokens
         }
 
         return full_text, generated_text, generated_ids, formatted_prompt, statistics, watermark_blocks_info
