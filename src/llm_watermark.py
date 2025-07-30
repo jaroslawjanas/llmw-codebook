@@ -21,7 +21,6 @@ from transformers import (
 from tqdm import tqdm
 from src.model_formatters import format_prompt_for_model
 from src.utils import load_hf_token
-from src.pm_galois import GaloisField, max_collinear_points, recover_line_equation
 import src.paths as paths
 
 
@@ -37,11 +36,11 @@ class LLMWatermarkerBase(ABC):
         secret_key: str,
         n: int,
         u: int,
-        green_list_fraction: float = 0.5,
-        seed: int = 42,
-        cache_dir: str = paths.CACHE_DIR,
-        device: Optional[str] = "cpu",
-        verbose: bool = False,
+        green_list_fraction: float,
+        seed: int,
+        cache_dir: str,
+        device: Optional[str],
+        verbose: bool
     ):
         """
         Initialize the base watermarker with shared parameters.
@@ -50,7 +49,6 @@ class LLMWatermarkerBase(ABC):
             model_name: HuggingFace model identifier
             secret_key: Secret key for watermarking
             n: Field size parameter (GF(2^n))
-            gf: Galois field instance GF(2^n)
             green_list_fraction: Fraction of tokens to include in green list (default: 0.5)
             seed: Random seed for reproducibility
             cache_dir: Directory to cache models
@@ -468,14 +466,14 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
                     
                     if is_green:
                         block_info["encoded_bits"].append(1)
-                        self.green_tokens_selected += 1
+                        green_tokens_selected += 1
                     else:
                         block_info["encoded_bits"].append(0)
-                        self.red_tokens_selected += 1
+                        red_tokens_selected += 1
                     
                     # Check if token was properly encoded (intended bit matches actual encoded bit)
                     if current_bit == encoded_bit:
-                        self.properly_encoded_tokens += 1
+                        properly_encoded_tokens += 1
 
                 # Add the new token to generated ids
                 all_ids.append(next_token_id)
@@ -483,7 +481,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
                 tokens_generated += 1
                 
                 # Update progress bar with stats
-                progress_bar.set_description(f"Encoding Block {block_idx+1}/{num_blocks}, Bit {bit_idx+1}/{self.u}, Green: {self.green_tokens_selected}, Red: {self.red_tokens_selected}")
+                progress_bar.set_description(f"Encoding Block {block_idx+1}/{num_blocks}, Bit {bit_idx+1}/{self.u}, Green: {green_tokens_selected}, Red: {red_tokens_selected}")
                 progress_bar.update(1)
                 
                 # Check if we've reached an EOS token
@@ -492,7 +490,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
             
             # Add completed block info
             watermark_blocks_info.append(block_info)
-            self.blocks_encoded += 1
+            blocks_encoded += 1
             
             # Check if we hit EOS in the middle of a block
             if all_ids[-1] == self.tokenizer.eos_token_id:
@@ -537,12 +535,13 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         self,
         model_name: str,
         secret_key: str,
+        n: int,
+        u: int,
         green_list_fraction: float = 0.5,
-        seed: int = 4242,
+        seed: int = 42,
         cache_dir: str = paths.CACHE_DIR,
         device: Optional[str] = "cpu",
         verbose: bool = False,
-        error_correction_k: int = 0,
     ):
         """
         Initialize the decoder with the same parameters used for encoding.
@@ -551,7 +550,6 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             model_name: HuggingFace model identifier (same as used for encoding)
             secret_key: Secret key for watermarking (same as used for encoding)
             n: Field size parameter (GF(2^n)) (same as used for encoding)
-            gf: Galois field instance GF(2^n) (same as used for encoding)
             green_list_fraction: Fraction of tokens in green list (same as used for encoding)
             seed: Random seed for reproducibility (same as used for encoding)
             cache_dir: Directory to cache models
@@ -560,7 +558,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             error_correction_k: Number of bits to flip for error correction (0 = disabled, must be < n)
         """
         # Initialize base class (loads tokenizer)
-        super().__init__(model_name, secret_key, green_list_fraction, seed, cache_dir, device, verbose)
+        super().__init__(model_name, secret_key, n, u, green_list_fraction, seed, cache_dir, device, verbose)
 
         
     def decode_text(self, generated_text: str = None, generated_ids: List[int] = None) -> List[Dict[str, Union[int, List[int]]]]:
@@ -589,9 +587,9 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             raise ValueError("Either generated_text or generated_ids must be provided")
 
         # Calculate number of complete blocks
-        num_complete_blocks = len(token_ids) // self.n
+        num_complete_blocks = len(token_ids) // self.u
         
-        if num_complete_blocks <= 1:
+        if num_complete_blocks < 1:
             return [], 0  # No complete blocks to decode
         
         blocks = []
@@ -601,23 +599,12 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         
         # Process each complete block
         for block_idx in range(num_complete_blocks):
-            start_idx = block_idx * self.n
-            end_idx = start_idx + self.n
+            start_idx = block_idx * self.u
+            end_idx = start_idx + self.u
             block_tokens = token_ids[start_idx:end_idx]
             
-            # Determine previous token for x-coordinate calculation
-            if block_idx == 0:
-                # First block uses token ID 0 (same as encoder)
-                previous_token = 0
-            else:
-                # Use last token of previous block
-                previous_token = token_ids[start_idx - 1]
-            
-            # Calculate x-coordinate using the same method as encoder
-            x = self._hash_to_gf_element(previous_token, self.secret_key)
-            
-            # Extract y_bits by classifying each token as green (1) or red (0)
-            y_bits = []
+            # Extract bits by classifying each token as green (1) or red (0)
+            bit_code = []
             for i, token_id in enumerate(block_tokens):
                 # Determine the previous token for vocabulary splitting
                 if start_idx + i == 0:
@@ -632,17 +619,10 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
                 
                 # Check if current token is in green list (1) or red list (0)
                 is_green = (green_tokens == token_id).any().item()
-                y_bits.append(1 if is_green else 0)
-            
-            # Convert y_bits back to GF element
-            y_gf = self._binary_to_gf(y_bits)
+                bit_code.append(1 if is_green else 0)
             
             # Store the extracted block information with lists for error correction variants
-            blocks.append({
-                "x": int(x),
-                "y_bits": [y_bits],  # List of y_bits variants (initially just original)
-                "y": [int(y_gf)]     # List of y values (initially just original)
-            })
+            blocks.append(bit_code)
             progress_bar.update(1)
         
         progress_bar.close()

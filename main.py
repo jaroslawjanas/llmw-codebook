@@ -1,5 +1,4 @@
 import argparse
-import galois
 import random
 import numpy as np
 import torch
@@ -10,7 +9,7 @@ import time
 from datetime import datetime
 import src.paths as paths
 from src.utils import get_shuffled_essays
-from src.llm_watermark import LLMWatermarkEncoder, LLMWatermarkDecoder, MCPSolver
+from src.llm_watermark import LLMWatermarkEncoder, LLMWatermarkDecoder
 from src.codebook import CodebookManager
 from tqdm import tqdm
 
@@ -60,11 +59,6 @@ def main():
             print(f"Device: {device} (CUDA available and enabled)\n")
         else:
             print(f"Device: {device} (CUDA not available, falling back to CPU)\n")
-        
-    # Create a Galois field of size 2^n
-    field_size = 2 ** args.n
-    gf = galois.GF(field_size)
-    
     
     # Generate a deterministic 64-bit secret key based on seed
     secret_key_int = random.getrandbits(64)
@@ -122,13 +116,14 @@ def main():
     
     # Initialize DataFrame with all required columns
     columns = [
-        "field_size", "prompt", "generated_text", "tokens_length", "secret_key", "properly_encoded_tokens",
-        "watermark_recovered", "encoding_time", "decoding_time"
+        "n", "u", "prompt", "generated_text", "tokens_length", "secret_key", "properly_encoded_tokens",
+        "watermark_recovered", "encoding_time", "decoding_time", "codebook_search_time"
     ]
     
     # Define explicit column types for proper data handling
     column_dtypes = {
-        "field_size": "int64",
+        "n": "int64",
+        "u": "int64",
         "prompt": "string",
         "generated_text": "string", 
         "tokens_length": "int64",
@@ -136,7 +131,8 @@ def main():
         "properly_encoded_tokens": "int64",
         "watermark_recovered": "boolean",
         "encoding_time": "float64",
-        "decoding_time": "float64"
+        "decoding_time": "float64",
+        "codebook_search_time": "float64"
     }
     
     stats_df = pd.DataFrame(index=range(total_prompts), columns=columns)
@@ -164,11 +160,12 @@ def main():
     codebook = CodebookManager(
         n=args.n,
         u=args.u,
-        secret_key=args.secret_key,
+        secret_key=secret_key,
         seed=args.seed
     )
 
-
+    successful_watermark_recoveries = 0
+    top_watermark_recoveries = 0
 
     for prompt_idx, prompt in enumerate(prompts, 0):
 
@@ -219,12 +216,52 @@ def main():
         decoder = LLMWatermarkDecoder(
             model_name=args.model,
             secret_key=secret_key,
+            n=args.n,
+            u=args.u,
             green_list_fraction=args.green_fraction,
             seed=args.seed,
             device=device,
             verbose=args.verbose
         )
         
+        decoding_start = time.time()
+        code_blocks, decoded_tokens_length = decoder.decode_text(generated_ids=generated_ids)
+        decoding_time = time.time() - decoding_start
+        
+        codebook_search_time = 0
+        successful_code_matches = 0
+        top_code_matches = 0
+
+        for code_block in code_blocks:
+            # Get the top 5 closest matches, handling potential None return
+            codebook_search_start = time.time()
+            matches = codebook.find_closest_matches(code_block, top=5)
+            codebook_search_time += time.time() - codebook_search_start
+            
+            if matches is None:
+                continue
+
+            # Check if the correct code is in top 5
+            found_in_top = False
+            for i, (recovered_code, recovered_identity, hamming_distance) in enumerate(matches):
+                is_successful = np.array_equal(recovered_code, bit_code)
+                if is_successful:
+                    found_in_top = True
+                    if i == 0:  # First match (top 1)
+                        successful_code_matches += 1
+                    break
+            
+            if found_in_top:
+                top_code_matches += 1
+
+        if successful_code_matches >= 1:
+            successful_watermark_recoveries += 1
+            
+        if top_code_matches >= 1:
+            top_watermark_recoveries += 1
+
+    print(f"Made {successful_watermark_recoveries} successful watermark recoveries out of {total_prompts}")
+    print(f"Made {top_watermark_recoveries} watermark recoveries in top 5 out of {total_prompts}")
 
 if __name__ == "__main__":
     main()

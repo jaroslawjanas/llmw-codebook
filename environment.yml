@@ -1,4 +1,4 @@
-name: llmw-lagrange
+name: llmw-codebook
 channels:
   - pytorch
   - nvidia
@@ -11,10 +11,9 @@ dependencies:
   - transformers=4.51.3
   - datasets=3.6.0
   - tqdm=4.67.1
-  - numpy>=2, <3
+  - numpy>=2
   - sentencepiece=0.2.0
   - pillow>=11, <12 # Some models might need this for AutoProcessor
-  - galois=0.4.6
   - pip
   - pip:
     - accelerate==1.7.0

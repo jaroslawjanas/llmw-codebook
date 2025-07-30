@@ -110,11 +110,11 @@ class CodebookManager:
             rng = np.random.default_rng(identity_seed)
             
             # Generate u random bits directly
-            bit_codes[i] = rng.randint(0, 2, size=self.u, dtype=np.uint8)
+            bit_codes[i] = rng.integers(0, 2, size=self.u, dtype=np.uint8)
         
         return bit_codes
     
-    def get_random_row(self, seed: int) -> Tuple[np.ndarray, int]:
+    def get_random_row(self, seed: int) -> Tuple[List[int], int]:
         """
         Get a random watermark identity and its corresponding bit code using a seeded RNG.
         
@@ -128,10 +128,10 @@ class CodebookManager:
         rng = np.random.default_rng(seed)
         
         # Generate a random watermark identity within the valid range [0, 2^n - 1]
-        watermark_identity = rng.randint(0, 2 ** self.n)
+        watermark_identity = rng.integers(0, 2 ** self.n)
         
-        # Get the corresponding bit code directly from the array
-        bit_code = self.bit_codes[watermark_identity]
+        # Get the corresponding bit code directly from the array and convert to list
+        bit_code = self.bit_codes[watermark_identity].tolist()
         
         return bit_code, watermark_identity
     
@@ -165,7 +165,7 @@ class CodebookManager:
         """
         # Input validation
         if len(target_bit_code) != self.u:
-            raise ValueError(f"Target bit code length ({len(target_bit_code)}) must match codebook bit length ({self.u})")
+            return None
         
         if not all(bit in [0, 1] for bit in target_bit_code):
             raise ValueError("Target bit code must contain only 0s and 1s")
