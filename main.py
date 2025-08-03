@@ -17,7 +17,7 @@ from tqdm import tqdm
 def main():
     parser = argparse.ArgumentParser(description="LLM Text Watermarking based on Lagrange Interpolation")
     parser.add_argument("--model", type=str, default="facebook/opt-125m", help="Model to use")
-    parser.add_argument("--max-tokens", type=int, default=304, help="Maximum tokens to generate")
+    parser.add_argument("--max-tokens", type=int, default=100, help="Maximum tokens to generate")
     parser.add_argument("--green-fraction", type=float, default=0.5, help="Fraction of tokens in green list")
     parser.add_argument("--bias", type=float, default=6.0, help="Bias to add to green/red tokens")
     parser.add_argument("--n", type=int, default=16, help="Size of the code table")
@@ -107,7 +107,7 @@ def main():
     model_name_clean = args.model.replace("/", "_")
     dataset_name_clean = dataset_name.replace("/", "_")
     
-    output_subdir = f"{model_name_clean}_{dataset_name_clean}_n{args.n}_{timestamp}"
+    output_subdir = f"{model_name_clean}_{dataset_name_clean}_n{args.n}_u{args.u}_{timestamp}"
     output_dir = os.path.join("output", output_subdir)
     os.makedirs(output_dir, exist_ok=True)
     
@@ -166,6 +166,9 @@ def main():
 
     successful_watermark_recoveries = 0
     top_watermark_recoveries = 0
+    successful_hamming_distances = []  # For top 1 matches
+    top100_hamming_distances = []     # For top 100 matches
+    full_generation_prompts = 0        # Count prompts with full max-tokens generation
 
     for prompt_idx, prompt in enumerate(prompts, 0):
 
@@ -232,23 +235,38 @@ def main():
         successful_code_matches = 0
         top_code_matches = 0
 
+        # Skip watermark recovery if generated text is shorter than max-tokens
+        if len(generated_ids) < args.max_tokens:
+            if args.verbose:
+                print(f"Skipping watermark recovery: generated {len(generated_ids)} tokens < {args.max_tokens} max tokens")
+            continue
+        
+        # Count prompts with full generation
+        full_generation_prompts += 1
+        
         for code_block in code_blocks:
-            # Get the top 5 closest matches, handling potential None return
+            # Get the top 100 closest matches, handling potential None return
             codebook_search_start = time.time()
-            matches = codebook.find_closest_matches(code_block, top=5)
+            matches = codebook.find_closest_matches(code_block, top=100)
             codebook_search_time += time.time() - codebook_search_start
             
             if matches is None:
                 continue
 
-            # Check if the correct code is in top 5
+            # Check if the correct code is in top 100
             found_in_top = False
             for i, (recovered_code, recovered_identity, hamming_distance) in enumerate(matches):
                 is_successful = np.array_equal(recovered_code, bit_code)
                 if is_successful:
                     found_in_top = True
+                    # Record hamming distance for top 100 recoveries
+                    top100_hamming_distances.append(hamming_distance)
+                    if args.verbose:
+                        print(f"Successful recovery at position {i+1} with hamming distance: {hamming_distance}")
                     if i == 0:  # First match (top 1)
                         successful_code_matches += 1
+                        # Record hamming distance for successful (top 1) recoveries
+                        successful_hamming_distances.append(hamming_distance)
                     break
             
             if found_in_top:
@@ -260,8 +278,85 @@ def main():
         if top_code_matches >= 1:
             top_watermark_recoveries += 1
 
-    print(f"Made {successful_watermark_recoveries} successful watermark recoveries out of {total_prompts}")
-    print(f"Made {top_watermark_recoveries} watermark recoveries in top 5 out of {total_prompts}")
+    # Create results file with parameters and statistics
+    results_file = os.path.join(output_dir, "results.txt")
+    
+    with open(results_file, 'w') as f:
+        # Write parameter information at the top
+        f.write("=" * 60 + "\n")
+        f.write("EXPERIMENT PARAMETERS\n")
+        f.write("=" * 60 + "\n")
+        f.write(f"Model: {args.model}\n")
+        f.write(f"Dataset: {dataset_name}/{dataset_subset} ({dataset_split} split, {dataset_column} column)\n")
+        f.write(f"n (code table size): {args.n}\n")
+        f.write(f"u (code size): {args.u}\n")
+        f.write(f"Number of prompts: {args.n_prompts}\n")
+        f.write(f"Max tokens: {args.max_tokens}\n")
+        f.write(f"Seed: {args.seed}\n")
+        f.write(f"Secret key: {secret_key}\n")
+        f.write(f"Green fraction: {args.green_fraction}\n")
+        f.write(f"Bias: {args.bias}\n")
+        f.write(f"Temperature: {args.temperature}\n")
+        f.write(f"Device: {device}\n")
+        f.write(f"Timestamp: {timestamp}\n")
+        f.write("\n")
+        
+        # Write results
+        f.write("=" * 60 + "\n")
+        f.write("RESULTS\n")
+        f.write("=" * 60 + "\n")
+        f.write(f"Total prompts processed: {total_prompts}\n")
+        f.write(f"Prompts with full generation: {full_generation_prompts}\n")
+        f.write(f"Successful watermark recoveries (top 1): {successful_watermark_recoveries} out of {full_generation_prompts}\n")
+        f.write(f"Watermark recoveries in top 100: {top_watermark_recoveries} out of {full_generation_prompts}\n")
+        
+        if full_generation_prompts > 0:
+            success_rate = successful_watermark_recoveries / full_generation_prompts * 100
+            top100_rate = top_watermark_recoveries / full_generation_prompts * 100
+            f.write(f"Success rate (top 1): {success_rate:.2f}%\n")
+            f.write(f"Success rate (top 100): {top100_rate:.2f}%\n")
+        
+        f.write("\n")
+        
+        # Write hamming distance statistics
+        if successful_hamming_distances:
+            avg_successful_hamming = np.mean(successful_hamming_distances)
+            min_successful_hamming = np.min(successful_hamming_distances)
+            max_successful_hamming = np.max(successful_hamming_distances)
+            f.write(f"Average hamming distance for successful recoveries (top 1): {avg_successful_hamming:.2f}\n")
+            f.write(f"Min hamming distance for successful recoveries (top 1): {min_successful_hamming}\n")
+            f.write(f"Max hamming distance for successful recoveries (top 1): {max_successful_hamming}\n")
+        else:
+            f.write("No successful recoveries (top 1) to calculate hamming distance statistics\n")
+        
+        f.write("\n")
+        
+        if top100_hamming_distances:
+            avg_top100_hamming = np.mean(top100_hamming_distances)
+            min_top100_hamming = np.min(top100_hamming_distances)
+            max_top100_hamming = np.max(top100_hamming_distances)
+            f.write(f"Average hamming distance for top 100 recoveries: {avg_top100_hamming:.2f}\n")
+            f.write(f"Min hamming distance for top 100 recoveries: {min_top100_hamming}\n")
+            f.write(f"Max hamming distance for top 100 recoveries: {max_top100_hamming}\n")
+        else:
+            f.write("No top 100 recoveries to calculate hamming distance statistics\n")
+
+    print(f"Results saved to: {results_file}")
+    print(f"Made {successful_watermark_recoveries} successful watermark recoveries out of {full_generation_prompts}")
+    print(f"Made {top_watermark_recoveries} watermark recoveries in top 100 out of {full_generation_prompts}")
+    
+    # Calculate and display average hamming distances
+    if successful_hamming_distances:
+        avg_successful_hamming = np.mean(successful_hamming_distances)
+        print(f"Average hamming distance for successful recoveries (top 1): {avg_successful_hamming:.2f}")
+    else:
+        print("No successful recoveries (top 1) to calculate average hamming distance")
+    
+    if top100_hamming_distances:
+        avg_top100_hamming = np.mean(top100_hamming_distances)
+        print(f"Average hamming distance for top 100 recoveries: {avg_top100_hamming:.2f}")
+    else:
+        print("No top 100 recoveries to calculate average hamming distance")
 
 if __name__ == "__main__":
     main()
