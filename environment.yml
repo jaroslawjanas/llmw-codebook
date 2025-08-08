@@ -14,6 +14,9 @@ dependencies:
   - numpy>=2
   - sentencepiece=0.2.0
   - pillow>=11, <12 # Some models might need this for AutoProcessor
+  - scipy>=1.1
+  - matplotlib>=3.10
+  - seaborn>=0.13
   - pip
   - pip:
     - accelerate==1.7.0

@@ -8,7 +8,7 @@ import os
 import hashlib
 import pandas as pd
 import numpy as np
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 import src.paths as paths
 
 
@@ -18,7 +18,7 @@ class CodebookManager:
     Each table maps watermark identities to u-bit codes using a pseudo-random function.
     """
     
-    def __init__(self, n: int, u: int, secret_key: str, seed: int = 42):
+    def __init__(self, n: int, u: int, secret_key: str, seed: int = 42, npz_dir: Optional[str] = ""):
         """Initialize the codebook manager and load/generate the codebook arrays."""
         self.n = n
         self.u = u
@@ -26,7 +26,11 @@ class CodebookManager:
         self.seed = seed
 
         self.filename_base = self._get_filename_base()
-        self.npz_path = os.path.join(paths.CODEBOOKS_CACHE_DIR, f"{self.filename_base}.npz")
+
+        if npz_dir:
+            self.npz_path = os.path.join(npz_dir, f"{self.filename_base}.npz")
+        else:
+            self.npz_path = os.path.join(paths.CODEBOOKS_CACHE_DIR, f"{self.filename_base}.npz")
         
         # Load or generate the codebook arrays directly
         self.bit_codes, self.watermark_identities = self._load_or_generate_arrays()
@@ -102,11 +106,11 @@ class CodebookManager:
         # Create bit codes array
         bit_codes = np.zeros((len(identities), self.u), dtype=np.uint8)
         
-        base_seed = (hash(self.secret_key) + self.seed)
+        base_seed = abs(hash(self.secret_key) + self.seed)
         
         for i, identity in enumerate(identities):
             # Create deterministic seed for this identity
-            identity_seed = (base_seed + identity)
+            identity_seed = (base_seed + int(identity)) % (2**32)
             rng = np.random.default_rng(identity_seed)
             
             # Generate u random bits directly
