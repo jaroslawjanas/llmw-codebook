@@ -21,3 +21,4 @@ dependencies:
   - pip:
     - accelerate==1.7.0
     - huggingface_hub==0.33.0
+    - protobuf==6.32.0
