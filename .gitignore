@@ -23,6 +23,7 @@ hf_token
 # https://docs.cline.bot/prompting/cline-memory-bank
 # AI Memory bank
 memory-bank/
+.clinerules/
 
 # Experiment utomation files
 *.sh
