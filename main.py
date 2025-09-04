@@ -114,6 +114,10 @@ def main():
     stats_file = os.path.join(output_dir, "statistics.csv")
     stats_parquet_file = os.path.join(output_dir, "statistics.parquet")
     
+    # Initialize per-generation outputs DataFrame (only full-length generations will be recorded)
+    generations_columns = ["bit_code", "watermark", "encoded_bit_code", "retrieved_watermark", "successful_watermark", "bit_code_hamming_distance"]
+    generations_df = pd.DataFrame(columns=generations_columns)
+    
     # Initialize DataFrame with all required columns
     columns = [
         "n", "u", "prompt", "generated_text", "tokens_length", "secret_key", "properly_encoded_tokens",
@@ -244,7 +248,12 @@ def main():
         # Count prompts with full generation
         full_generation_prompts += 1
         
-        for code_block in code_blocks:
+        # Track best top-1 match across all decoded blocks for this prompt
+        best_block_idx = None
+        best_identity = None
+        best_distance = None
+        
+        for block_idx, code_block in enumerate(code_blocks):
             # Get the top 100 closest matches, handling potential None return
             codebook_search_start = time.time()
             matches = codebook.find_closest_matches(code_block, top=100)
@@ -252,6 +261,13 @@ def main():
             
             if matches is None:
                 continue
+
+            # Track best top-1 candidate across blocks for CSV
+            top1_code, top1_identity, top1_distance = matches[0]
+            if (best_distance is None) or (top1_distance < best_distance):
+                best_distance = int(top1_distance)
+                best_identity = int(top1_identity)
+                best_block_idx = block_idx
 
             # Check if the correct code is in top 100
             found_in_top = False
@@ -277,6 +293,26 @@ def main():
             
         if top_code_matches >= 1:
             top_watermark_recoveries += 1
+
+        # Append per-generation row to DataFrame (full-length generations only)
+        bit_code_str = ''.join(map(str, bit_code))
+        if best_block_idx is not None and best_block_idx < len(watermark_blocks_info):
+            encoded_bits_block = watermark_blocks_info[best_block_idx].get("encoded_bits", [])
+            encoded_bit_code_str = ''.join(map(str, encoded_bits_block)) if encoded_bits_block else ""
+        else:
+            encoded_bit_code_str = ""
+        retrieved_watermark_val = int(best_identity) if best_identity is not None else pd.NA
+        bit_code_hamming_distance_val = int(best_distance) if best_distance is not None else pd.NA
+        successful_watermark_flag = bool(best_identity == watermark_identity) if best_identity is not None else False
+
+        generations_df.loc[len(generations_df)] = {
+            "bit_code": bit_code_str,
+            "watermark": int(watermark_identity),
+            "encoded_bit_code": encoded_bit_code_str,
+            "retrieved_watermark": retrieved_watermark_val,
+            "successful_watermark": successful_watermark_flag,
+            "bit_code_hamming_distance": bit_code_hamming_distance_val,
+        }
 
     # Create results file with parameters and statistics
     results_file = os.path.join(output_dir, "results.txt")
@@ -357,6 +393,18 @@ def main():
         print(f"Average hamming distance for top 100 recoveries: {avg_top100_hamming:.2f}")
     else:
         print("No top 100 recoveries to calculate average hamming distance")
+
+    # Save per-generation outputs (CSV and Parquet) alongside results.txt
+    generations_csv = os.path.join(output_dir, "generations.csv")
+    generations_parquet = os.path.join(output_dir, "generations.parquet")
+    try:
+        generations_df.to_csv(generations_csv, index=False)
+    except Exception as e:
+        print(f"Warning: Failed to save CSV: {e}")
+    try:
+        generations_df.to_parquet(generations_parquet, index=False)
+    except Exception as e:
+        print(f"Warning: Failed to save Parquet: {e}")
 
 if __name__ == "__main__":
     main()
