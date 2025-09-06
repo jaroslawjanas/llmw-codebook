@@ -465,6 +465,14 @@ def main():
     paths.ensure_directories()
     ensure_dirs(args.save_dir)
 
+    # Create timestamped run subfolder under save-dir
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir_name = f"tpr_fpr_roc_n{args.n}_u{args.u}_z{args.z}_{timestamp}"
+    run_save_dir = os.path.join(args.save_dir, run_dir_name)
+    ensure_dirs(run_save_dir)
+    if args.verbose:
+        print(f"Saving outputs to: {run_save_dir}")
+
     # Initialize RNG for reproducibility
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -515,13 +523,13 @@ def main():
         model_to_curves[model] = (thresholds, fpr, tpr, tpr_at_target)
 
         # Save per-model ROC CSV and plot
-        csv_path = save_roc_csv(args.save_dir, model, thresholds, fpr, tpr, args.n, args.u, args.z)
-        png_path = plot_per_model(model, thresholds, fpr, tpr, tpr_at_target, args.fpr_target, args.save_dir, args.n, args.u, args.z)
+        csv_path = save_roc_csv(run_save_dir, model, thresholds, fpr, tpr, args.n, args.u, args.z)
+        png_path = plot_per_model(model, thresholds, fpr, tpr, tpr_at_target, args.fpr_target, run_save_dir, args.n, args.u, args.z)
 
         print(f"[{model}] TPR@{int(args.fpr_target*100)}%FPR = {tpr_at_target*100:.2f}% | Saved: {os.path.basename(png_path)}, {os.path.basename(csv_path)}")
 
     # 5) Combined plot
-    combined_path = plot_combined(model_to_curves, args.fpr_target, args.save_dir, args.n, args.u, args.z)
+    combined_path = plot_combined(model_to_curves, args.fpr_target, run_save_dir, args.n, args.u, args.z)
     print(f"Combined ROC saved to: {combined_path}")
 
     # Optional: show plots interactively (if not in headless environment)
