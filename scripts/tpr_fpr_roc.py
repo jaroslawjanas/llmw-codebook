@@ -10,6 +10,8 @@ TPR/FPR ROC Construction and Plotting
 Usage examples (PowerShell-friendly):
   python scripts/tpr_fpr_roc.py --n 20 --u 128 --z 10000 --fpr-target 0.01 --verbose
   python scripts/tpr_fpr_roc.py --n 20 --u 128 --include-models meta-llama/Llama-3.2-3B --no-show
+  python scripts/tpr_fpr_roc.py --n 20 --u 128 --z 10000 --tmin 8 --tmax 40 --fpr-target 0.01
+  python scripts/tpr_fpr_roc.py --n 20 --u 128 --tmax 64 --include-models meta-llama/Llama-3.2-3B --no-show
 """
 
 import os
@@ -238,9 +240,12 @@ def compute_curves(
     neg_distances: np.ndarray,
     positives_df: pd.DataFrame,
     u: int,
+    tmin: int = 0,
+    tmax: Optional[int] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Compute thresholds, FPR, and TPR arrays for thresholds in [0..u] inclusive.
+    Compute thresholds, FPR, and TPR arrays for thresholds in [tmin..tmax] inclusive.
+    If tmax is None, it defaults to u.
 
     TPR definition:
       - Let Total = total rows in positives_df (all are positives by design)
@@ -252,35 +257,54 @@ def compute_curves(
       - Negatives are the generated random sequences
       - FPR(t) = mean(neg_distances <= t)
     """
-    thresholds = np.arange(0, u + 1, dtype=np.int32)
+    # Clamp tmin/tmax to [0, u]
+    if tmax is None:
+        tmax = u
+    tmin = int(max(0, min(u, int(tmin))))
+    tmax = int(max(0, min(u, int(tmax))))
+    if tmin > tmax:
+        return (
+            np.array([], dtype=np.int32),
+            np.array([], dtype=np.float64),
+            np.array([], dtype=np.float64),
+        )
 
-    # FPR
+    thresholds_full = np.arange(0, u + 1, dtype=np.int32)
+
+    # FPR (full, then slice)
     if neg_distances.size == 0:
-        fpr = np.zeros_like(thresholds, dtype=np.float64)
+        fpr_full = np.zeros_like(thresholds_full, dtype=np.float64)
     else:
-        # counts <= t
         hist_neg = np.bincount(neg_distances, minlength=u + 1)
         cdf_neg = np.cumsum(hist_neg)
-        fpr = cdf_neg / float(len(neg_distances))
+        fpr_full = cdf_neg / float(len(neg_distances))
 
-    # TPR
+    # TPR (full, then slice)
     total = len(positives_df)
     if total == 0:
-        tpr = np.zeros_like(thresholds, dtype=np.float64)
-        return thresholds, fpr, tpr
-
-    # Successful rows and their distances (missing distances treated as FN)
-    mask_success = positives_df["successful_watermark"] == True
-    succ_distances = positives_df.loc[mask_success, "bit_code_hamming_distance"].dropna().astype(int).to_numpy()
-
-    if succ_distances.size == 0:
-        tp_counts = np.zeros_like(thresholds, dtype=np.int64)
+        tpr_full = np.zeros_like(thresholds_full, dtype=np.float64)
     else:
-        hist_succ = np.bincount(succ_distances, minlength=u + 1)
-        cdf_succ = np.cumsum(hist_succ)
-        tp_counts = cdf_succ
+        mask_success = positives_df["successful_watermark"] == True
+        succ_distances = (
+            positives_df.loc[mask_success, "bit_code_hamming_distance"]
+            .dropna()
+            .astype(int)
+            .to_numpy()
+        )
 
-    tpr = tp_counts / float(total)
+        if succ_distances.size == 0:
+            tp_counts = np.zeros_like(thresholds_full, dtype=np.int64)
+        else:
+            hist_succ = np.bincount(succ_distances, minlength=u + 1)
+            cdf_succ = np.cumsum(hist_succ)
+            tp_counts = cdf_succ
+
+        tpr_full = tp_counts / float(total)
+
+    # Slice to requested threshold range
+    thresholds = np.arange(tmin, tmax + 1, dtype=np.int32)
+    fpr = fpr_full[tmin : tmax + 1]
+    tpr = tpr_full[tmin : tmax + 1]
     return thresholds, fpr, tpr
 
 
@@ -425,6 +449,8 @@ def main():
     parser.add_argument("--n", type=int, default=16, help="Size of the code table (2^n entries)")
     parser.add_argument("--u", type=int, default=100, help="Size of the codes (bit length)")
     parser.add_argument("--z", type=int, default=10000, help="Number of negative random sequences to test")
+    parser.add_argument("--tmin", type=int, default=None, help="Minimum Hamming threshold (inclusive). Defaults to 0.")
+    parser.add_argument("--tmax", type=int, default=None, help="Maximum Hamming threshold (inclusive). Defaults to u.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--fpr-target", type=float, default=0.01, help="Target FPR for reporting TPR (default=0.01)")
     parser.add_argument("--output-root", type=str, default="output", help="Root directory containing model run outputs")
@@ -452,6 +478,15 @@ def main():
         print(f"Generating negatives: z={args.z}, u={args.u}")
         print(f"Collecting positives from: {args.output_root} (n={args.n}, u={args.u})")
 
+    # Resolve threshold range
+    tmin = 0 if args.tmin is None else max(0, min(args.u, int(args.tmin)))
+    tmax = args.u if args.tmax is None else max(0, min(args.u, int(args.tmax)))
+    if tmin > tmax:
+        print(f"Invalid threshold range: tmin ({tmin}) > tmax ({tmax}).")
+        sys.exit(1)
+    if args.verbose:
+        print(f"Threshold range: [{tmin}..{tmax}] (u={args.u})")
+
     # 1) FPR: negative set distances
     neg_distances = generate_negative_distances(
         n=args.n, u=args.u, z=args.z, seed=args.seed, secret_key=secret_key, verbose=args.verbose
@@ -475,7 +510,7 @@ def main():
     model_to_curves: Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray, float]] = {}
 
     for model, df in model_to_df.items():
-        thresholds, fpr, tpr = compute_curves(neg_distances, df, args.u)
+        thresholds, fpr, tpr = compute_curves(neg_distances, df, args.u, tmin=tmin, tmax=tmax)
         tpr_at_target, _, _, _ = interpolate_tpr_at_fpr(fpr, tpr, args.fpr_target)
         model_to_curves[model] = (thresholds, fpr, tpr, tpr_at_target)
 
