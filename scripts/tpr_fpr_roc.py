@@ -19,6 +19,7 @@ import sys
 import re
 import argparse
 import random
+import zlib
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -207,11 +208,77 @@ def generate_negative_distances(
     verbose: bool = False,
 ) -> np.ndarray:
     """
-    Generate z random sequences of length u, find closest codebook matches, and return their Hamming distances.
+    Generate or load cached negative distances (Hamming distances of random sequences to the closest code).
+    Caching strategy:
+      - Exact hit: load cache file for (n,u,z,seed,secret_key).
+      - Downsample: if a larger cache exists with same (n,u,seed,secret_key) and z_big >= z,
+        deterministically sample z entries without replacement, save the exact cache, and return.
+      - Miss: generate with a local seeded RNG, save, and return.
     """
-    # Ensure paths setup for codebook cache
+    # Ensure paths setup for caches
     paths.ensure_directories()
+    os.makedirs(paths.SCRIPTS_CACHE_DIR, exist_ok=True)
 
+    sk_clean = sanitize_filename(secret_key)
+
+    def build_cache_path(z_val: int) -> str:
+        fname = f"negative_distances_z{z_val}_s{seed}_n{n}_u{u}_sk{sk_clean}.npz"
+        return os.path.join(paths.SCRIPTS_CACHE_DIR, fname)
+
+    exact_path = build_cache_path(z)
+
+    # 1) Try exact cache
+    if os.path.isfile(exact_path):
+        try:
+            with np.load(exact_path) as npz:
+                distances = npz["distances"].astype(np.int32, copy=False)
+            if distances.shape[0] == z:
+                print(f"Loaded negative distances from cache: {exact_path} (z={z}, seed={seed}, n={n}, u={u}, sk={secret_key})")
+                return distances
+        except Exception:
+            # Corrupt cache, fall through to search/generate
+            pass
+
+    # 2) Try larger cache for downsampling
+    pattern = re.compile(rf"^negative_distances_z(\d+)_s{seed}_n{n}_u{u}_sk{re.escape(sk_clean)}\.npz$")
+    best_path = None
+    best_z = -1
+    try:
+        for name in os.listdir(paths.SCRIPTS_CACHE_DIR):
+            m = pattern.match(name)
+            if not m:
+                continue
+            z_found = int(m.group(1))
+            if z_found > best_z:
+                best_z = z_found
+                best_path = os.path.join(paths.SCRIPTS_CACHE_DIR, name)
+    except Exception:
+        best_path = None
+        best_z = -1
+
+    if best_path is not None and best_z >= z and os.path.abspath(best_path) != os.path.abspath(exact_path):
+        try:
+            with np.load(best_path) as npz:
+                big = npz["distances"].astype(np.int32, copy=False)
+            if big.shape[0] >= z:
+                # Deterministic subset using a derived seed (stable across runs)
+                sk_crc = zlib.crc32(secret_key.encode("utf-8")) & 0xFFFFFFFF
+                ss = np.random.SeedSequence([seed, z, n, u, sk_crc])
+                rng = np.random.default_rng(ss)
+                idx = rng.choice(big.shape[0], size=z, replace=False)
+                distances = big[idx]
+                # Save the downsampled exact cache
+                try:
+                    np.savez_compressed(exact_path, distances=distances.astype(np.int32, copy=False))
+                except Exception:
+                    pass
+                print(f"Loaded larger cache and downsampled {big.shape[0]}→{z} from {best_path}; wrote: {exact_path}")
+                return distances
+        except Exception:
+            # Fall back to generation
+            pass
+
+    # 3) Generate from scratch with a local seeded RNG (independent of global state)
     codebook = CodebookManager(
         n=n,
         u=u,
@@ -219,21 +286,30 @@ def generate_negative_distances(
         # Let CodebookManager use default cache dir (paths.CODEBOOKS_CACHE_DIR)
     )
 
-    distances: List[int] = []
-
+    distances_list: List[int] = []
     itr = range(z)
     if verbose:
         itr = tqdm(itr, desc="Generating negatives (random sequences)")
 
+    rng = np.random.default_rng(seed)
     for _ in itr:
-        # Generate random bit sequence of length u
-        seq = [random.randint(0, 1) for _ in range(u)]
+        # Generate random bit sequence of length u using local RNG
+        seq = rng.integers(0, 2, size=u, dtype=np.uint8).tolist()
         matches = codebook.find_closest_matches(seq, top=1)
         if matches:
             _, _, d = matches[0]
-            distances.append(int(d))
+            distances_list.append(int(d))
 
-    return np.array(distances, dtype=np.int32)
+    distances = np.array(distances_list, dtype=np.int32)
+
+    # Save cache
+    try:
+        np.savez_compressed(exact_path, distances=distances)
+        print(f"Generated negative distances and saved cache to: {exact_path} (z={len(distances)})")
+    except Exception:
+        print(f"Generated negative distances (cache save failed): {exact_path}")
+
+    return distances
 
 
 def compute_curves(
