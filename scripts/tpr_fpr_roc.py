@@ -30,6 +30,7 @@ sys.path.insert(0, PROJECT_ROOT)
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
 
 from tqdm import tqdm
 import src.paths as paths
@@ -364,29 +365,69 @@ def plot_per_model(
     n: int,
     u: int,
     z: int,
+    scale: str = "linear",
+    x_eps: Optional[float] = None,
+    fpr_min: Optional[float] = None,
+    fpr_max: Optional[float] = None,
 ) -> str:
     """
     Produce and save a per-model ROC plot.
     Returns the path to the saved PNG.
+    Supports axis scaling modes via `scale`: "linear", "logx", "symlogx", "loglog".
+    - logx: logarithmic x-axis (FPR), replaces FPR=0 with a small epsilon.
+    - symlogx: symmetric log x-axis with small linear region around 0 (keeps FPR=0 visible).
+    - loglog: logarithmic x and y axes (TPR zeros replaced with epsilon for plotting).
     """
-    plt.figure(figsize=(7, 6))
-    plt.plot(fpr, tpr, label=f"{model} (TPR@{int(fpr_target*100)}%FPR={tpr_at_target*100:.1f}%)", linewidth=2)
-    # Mark the target point
-    plt.scatter([fpr_target], [tpr_at_target], color="red", s=30, zorder=5)
+    fig, ax = plt.subplots(figsize=(7, 6))
 
-    plt.xlabel("False Positive Rate (FPR)")
-    plt.ylabel("True Positive Rate (TPR)")
-    plt.title(f"ROC — {model}\n(n={n}, u={u}, negatives z={z})")
-    plt.xlim(0.0, 1.0)
-    plt.ylim(0.0, 1.0)
-    plt.grid(True, alpha=0.3)
-    plt.legend(loc="lower right")
-    plt.tight_layout()
+    s = (scale or "linear").lower()
+    fpr_plot = fpr.copy()
+    tpr_plot = tpr.copy()
+
+    # Determine epsilons and x range
+    min_positive_fpr = float(np.min(fpr[fpr > 0])) if np.any(fpr > 0) else None
+    auto_eps = max((min_positive_fpr / 10.0 if min_positive_fpr is not None else 1.0 / (10.0 * max(z, 1))), 1e-12)
+    eps = x_eps if x_eps is not None else auto_eps
+
+    if s == "linear":
+        ax.set_xlim(0.0, 1.0)
+    elif s in ("logx", "loglog"):
+        fpr_plot = np.where(fpr > 0, fpr, eps)
+        ax.set_xscale("log")
+        x_min = fpr_min if fpr_min is not None else max(min_positive_fpr if min_positive_fpr is not None else eps, eps)
+        x_max = fpr_max if fpr_max is not None else 1.0
+        ax.set_xlim(x_min, x_max)
+        if s == "loglog":
+            min_positive_tpr = float(np.min(tpr[tpr > 0])) if np.any(tpr > 0) else None
+            y_eps = max((min_positive_tpr / 10.0 if min_positive_tpr is not None else 1e-4), 1e-12)
+            tpr_plot = np.where(tpr > 0, tpr, y_eps)
+            ax.set_yscale("log")
+    elif s == "symlogx":
+        # Keep zeros; show a small linear neighborhood near 0
+        linthresh = eps
+        ax.set_xscale("symlog", linthresh=linthresh, linscale=1.0, base=10)
+        x_min = fpr_min if fpr_min is not None else 0.0
+        x_max = fpr_max if fpr_max is not None else 1.0
+        ax.set_xlim(x_min, x_max)
+
+    ax.plot(fpr_plot, tpr_plot, label=f"{model} (TPR@{int(fpr_target*100)}%FPR={tpr_at_target*100:.1f}%)", linewidth=2)
+    # Mark the target point
+    ax.scatter([fpr_target if s == "linear" else max(fpr_target, eps)], [tpr_at_target], color="red", s=30, zorder=5)
+
+    ax.set_xlabel("False Positive Rate (FPR)")
+    ax.set_ylabel("True Positive Rate (TPR)")
+    ax.set_title(f"ROC — {model}\n(n={n}, u={u}, negatives z={z})")
+    if s != "loglog":
+        ax.set_ylim(0.0, 1.0)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="lower right")
+    fig.tight_layout()
 
     model_clean = sanitize_filename(model)
-    out_path = os.path.join(save_dir, f"roc_{model_clean}_n{n}_u{u}_z{z}.png")
-    plt.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close()
+    scale_suffix = f"_{s}" if s != "linear" else ""
+    out_path = os.path.join(save_dir, f"roc_{model_clean}_n{n}_u{u}_z{z}{scale_suffix}.png")
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
     return out_path
 
 
@@ -397,37 +438,93 @@ def plot_combined(
     n: int,
     u: int,
     z: int,
+    scale: str = "linear",
+    x_eps: Optional[float] = None,
+    fpr_min: Optional[float] = None,
+    fpr_max: Optional[float] = None,
 ) -> str:
     """
     Produce and save a combined ROC plot for all models.
     model_to_curves: model -> (thresholds, fpr, tpr, tpr_at_target)
     Returns saved path.
     """
-    plt.figure(figsize=(8, 7))
+    fig, ax = plt.subplots(figsize=(8, 7))
+
+    s = (scale or "linear").lower()
+
+    # Determine plotting parameters across all curves for good defaults
+    all_fpr = np.concatenate([v[1] for v in model_to_curves.values()]) if model_to_curves else np.array([])
+    min_positive_fpr = float(np.min(all_fpr[all_fpr > 0])) if np.any(all_fpr > 0) else None
+    auto_eps = max((min_positive_fpr / 10.0 if min_positive_fpr is not None else 1.0 / (10.0 * max(z, 1))), 1e-12)
+    eps = x_eps if x_eps is not None else auto_eps
+
+    # Set axis scales and baseline domain
+    if s == "linear":
+        ax.set_xlim(0.0, 1.0)
+        baseline_x = np.linspace(0.0, 1.0, 1001)
+    elif s in ("logx", "loglog"):
+        ax.set_xscale("log")
+        x_min = fpr_min if fpr_min is not None else max(min_positive_fpr if min_positive_fpr is not None else eps, eps)
+        x_max = fpr_max if fpr_max is not None else 1.0
+        ax.set_xlim(x_min, x_max)
+        baseline_x = np.geomspace(x_min, 1.0, 1001)
+        if s == "loglog":
+            ax.set_yscale("log")
+    elif s == "symlogx":
+        linthresh = eps
+        ax.set_xscale("symlog", linthresh=linthresh, linscale=1.0, base=10)
+        x_min = fpr_min if fpr_min is not None else 0.0
+        x_max = fpr_max if fpr_max is not None else 1.0
+        ax.set_xlim(x_min, x_max)
+        baseline_x = np.geomspace(max(linthresh, 1e-12), 1.0, 1001)
+    else:
+        baseline_x = np.linspace(0.0, 1.0, 1001)
 
     # Random baseline
-    xx = np.linspace(0, 1, 1001)
-    plt.plot(xx, xx, linestyle="--", color="gray", linewidth=1, label="Random baseline")
+    ax.plot(baseline_x, baseline_x, linestyle="--", color="gray", linewidth=1, label="Random baseline")
 
     for model, (thresholds, fpr, tpr, tpr_at_target) in model_to_curves.items():
+        if s == "linear":
+            fpr_plot, tpr_plot = fpr, tpr
+            target_x = fpr_target
+            target_y = tpr_at_target
+        elif s in ("logx", "loglog"):
+            fpr_plot = np.where(fpr > 0, fpr, eps)
+            if s == "loglog":
+                min_positive_tpr = float(np.min(tpr[tpr > 0])) if np.any(tpr > 0) else None
+                y_eps = max((min_positive_tpr / 10.0 if min_positive_tpr is not None else 1e-4), 1e-12)
+                tpr_plot = np.where(tpr > 0, tpr, y_eps)
+                target_y = max(tpr_at_target, y_eps)
+            else:
+                tpr_plot = tpr
+                target_y = tpr_at_target
+            target_x = max(fpr_target, eps)
+        elif s == "symlogx":
+            fpr_plot = fpr
+            tpr_plot = tpr
+            target_x = fpr_target
+            target_y = tpr_at_target
+        else:
+            fpr_plot, tpr_plot = fpr, tpr
+            target_x, target_y = fpr_target, tpr_at_target
+
         label = f"{model} (TPR@{int(fpr_target*100)}%FPR={tpr_at_target*100:.1f}%)"
-        plt.plot(fpr, tpr, linewidth=2, label=label)
+        ax.plot(fpr_plot, tpr_plot, linewidth=2, label=label)
+        ax.scatter([target_x], [target_y], s=25)
 
-        # Mark the target point on this curve (x = fpr_target, y = interpolated TPR)
-        plt.scatter([fpr_target], [tpr_at_target], s=25)
+    ax.set_xlabel("False Positive Rate (FPR)")
+    ax.set_ylabel("True Positive Rate (TPR)")
+    ax.set_title(f"ROC (Combined)\n(n={n}, u={u}, negatives z={z})")
+    if s != "loglog":
+        ax.set_ylim(0.0, 1.0)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="lower right", fontsize=9)
+    fig.tight_layout()
 
-    plt.xlabel("False Positive Rate (FPR)")
-    plt.ylabel("True Positive Rate (TPR)")
-    plt.title(f"ROC (Combined)\n(n={n}, u={u}, negatives z={z})")
-    plt.xlim(0.0, 1.0)
-    plt.ylim(0.0, 1.0)
-    plt.grid(True, alpha=0.3)
-    plt.legend(loc="lower right", fontsize=9)
-    plt.tight_layout()
-
-    out_path = os.path.join(save_dir, f"roc_combined_n{n}_u{u}_z{z}.png")
-    plt.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close()
+    scale_suffix = f"_{s}" if s != "linear" else ""
+    out_path = os.path.join(save_dir, f"roc_combined_n{n}_u{u}_z{z}{scale_suffix}.png")
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
     return out_path
 
 
@@ -458,6 +555,15 @@ def main():
     parser.add_argument("--include-models", type=str, nargs="+", help="Optional substrings to filter canonical model names")
     parser.add_argument("--no-show", action="store_true", help="Skip plt.show() (useful in headless runs)")
     parser.add_argument("--verbose", action="store_true", help="Show detailed output and progress information")
+    # Plot scaling and axis controls
+    parser.add_argument("--scale", type=str, choices=["linear", "logx", "symlogx", "loglog"], default="linear",
+                        help="Axis scaling for plots: linear (default), logx (log FPR), symlogx (log FPR with linear region near 0), loglog (log FPR and TPR)")
+    parser.add_argument("--x-eps", dest="x_eps", type=float, default=None,
+                        help="Small epsilon used when plotting FPR=0 on log axes. Default auto-computed.")
+    parser.add_argument("--fpr-min", dest="fpr_min", type=float, default=None,
+                        help="Minimum FPR for x-axis limits (useful with --scale logx/symlogx).")
+    parser.add_argument("--fpr-max", dest="fpr_max", type=float, default=None,
+                        help="Maximum FPR for x-axis limits (default 1.0).")
 
     args = parser.parse_args()
 
@@ -521,12 +627,19 @@ def main():
 
         # Save per-model ROC CSV and plot
         csv_path = save_roc_csv(run_save_dir, model, thresholds, fpr, tpr, args.n, args.u, args.z)
-        png_path = plot_per_model(model, thresholds, fpr, tpr, tpr_at_target, args.fpr_target, run_save_dir, args.n, args.u, args.z)
+        png_path = plot_per_model(
+            model, thresholds, fpr, tpr, tpr_at_target, args.fpr_target,
+            run_save_dir, args.n, args.u, args.z,
+            scale=args.scale, x_eps=args.x_eps, fpr_min=args.fpr_min, fpr_max=args.fpr_max
+        )
 
         print(f"[{model}] TPR@{int(args.fpr_target*100)}%FPR = {tpr_at_target*100:.2f}% | Saved: {os.path.basename(png_path)}, {os.path.basename(csv_path)}")
 
     # 5) Combined plot
-    combined_path = plot_combined(model_to_curves, args.fpr_target, run_save_dir, args.n, args.u, args.z)
+    combined_path = plot_combined(
+        model_to_curves, args.fpr_target, run_save_dir, args.n, args.u, args.z,
+        scale=args.scale, x_eps=args.x_eps, fpr_min=args.fpr_min, fpr_max=args.fpr_max
+    )
     print(f"Combined ROC saved to: {combined_path}")
 
     # Optional: show plots interactively (if not in headless environment)
