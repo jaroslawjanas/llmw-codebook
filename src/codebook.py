@@ -18,12 +18,11 @@ class CodebookManager:
     Each table maps watermark identities to u-bit codes using a pseudo-random function.
     """
     
-    def __init__(self, n: int, u: int, secret_key: str, seed: int = 42, npz_dir: Optional[str] = ""):
+    def __init__(self, n: int, u: int, secret_key: str, npz_dir: Optional[str] = ""):
         """Initialize the codebook manager and load/generate the codebook arrays."""
         self.n = n
         self.u = u
         self.secret_key = secret_key
-        self.seed = seed
 
         self.filename_base = self._get_filename_base()
 
@@ -91,7 +90,7 @@ class CodebookManager:
         Returns:
             Filename base string
         """
-        return f"codebook_n{self.n}_u{self.u}_sk_{self.secret_key}_s_{self.seed}"
+        return f"codebook_n{self.n}_u{self.u}_sk_{self.secret_key}"
     
     def _generate_bit_codes_vectorized(self, identities: np.ndarray) -> np.ndarray:
         """
@@ -106,11 +105,11 @@ class CodebookManager:
         # Create bit codes array
         bit_codes = np.zeros((len(identities), self.u), dtype=np.uint8)
         
-        base_seed = abs(hash(self.secret_key) + self.seed)
-        
         for i, identity in enumerate(identities):
-            # Create deterministic seed for this identity
-            identity_seed = (base_seed + int(identity)) % (2**32)
+            # Derive a deterministic per-identity seed from secret_key and identity only
+            seed_material = f"{self.secret_key}:{int(identity)}".encode("utf-8")
+            digest = hashlib.sha256(seed_material).digest()
+            identity_seed = int.from_bytes(digest[:8], "big")
             rng = np.random.default_rng(identity_seed)
             
             # Generate u random bits directly

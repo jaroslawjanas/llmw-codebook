@@ -179,6 +179,7 @@ def main():
     parser.add_argument("--u", type=int, default=100, help="Size of the codes (bit length)")
     parser.add_argument("--z", type=int, default=1000, help="Number of random sequences to test")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    parser.add_argument("--secret-key", type=str, default="25111915", help="Secret key used for codebook generation (string)")
     parser.add_argument("--verbose", action="store_true", help="Show detailed output and progress information")
     parser.add_argument("--output-dir", type=str, help="Output directory (auto-generated if not provided)")
     parser.add_argument("--no-plots", action="store_true", help="Skip plot generation")
@@ -189,12 +190,9 @@ def main():
     random.seed(args.seed)
     np.random.seed(args.seed)
 
-    # Generate a deterministic 64-bit secret key based on seed (same as main.py)
-    secret_key_int = random.getrandbits(64)
-    secret_key = f"{secret_key_int:016x}"  # Format as 16-character hex string
     
     if args.verbose:
-        print(f"Generated seed based 64-bit secret key: {secret_key}")
+        print(f"Using secret key: {args.secret_key}")
         print(f"Creating codebook with n={args.n}, u={args.u}")
 
     # Create dynamic output directory if not provided
@@ -212,8 +210,7 @@ def main():
     codebook = CodebookManager(
         n=args.n,
         u=args.u,
-        secret_key=secret_key,
-        seed=args.seed,
+        secret_key=args.secret_key,
         npz_dir=output_dir
     )
 
@@ -265,7 +262,7 @@ def main():
         f.write(f"  u (code length): {args.u}\n")
         f.write(f"  z (test sequences): {args.z}\n")
         f.write(f"  seed: {args.seed}\n")
-        f.write(f"  secret_key: {secret_key}\n")
+        f.write(f"  secret_key: {args.secret_key}\n")
         f.write(f"  timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write("\n")
         
@@ -300,7 +297,7 @@ def main():
         'u': args.u,
         'z': args.z,
         'seed': args.seed,
-        'secret_key': secret_key,
+        'secret_key': args.secret_key,
         'timestamp': datetime.now().isoformat(),
         'statistics': stats_dict,
         'theoretical_mean': theoretical_mean,

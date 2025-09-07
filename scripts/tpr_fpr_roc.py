@@ -215,7 +215,6 @@ def generate_negative_distances(
         n=n,
         u=u,
         secret_key=secret_key,
-        seed=seed,
         # Let CodebookManager use default cache dir (paths.CODEBOOKS_CACHE_DIR)
     )
 
@@ -452,6 +451,7 @@ def main():
     parser.add_argument("--tmin", type=int, default=None, help="Minimum Hamming threshold (inclusive). Defaults to 0.")
     parser.add_argument("--tmax", type=int, default=None, help="Maximum Hamming threshold (inclusive). Defaults to u.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    parser.add_argument("--secret-key", type=str, default="25111915", help="Secret key used for codebook generation (string)")
     parser.add_argument("--fpr-target", type=float, default=0.01, help="Target FPR for reporting TPR (default=0.01)")
     parser.add_argument("--output-root", type=str, default="output", help="Root directory containing model run outputs")
     parser.add_argument("--save-dir", type=str, default=os.path.join("scripts", "output"), help="Directory to save plots/CSVs")
@@ -477,12 +477,9 @@ def main():
     random.seed(args.seed)
     np.random.seed(args.seed)
 
-    # Generate a deterministic 64-bit secret key based on seed (same approach as main.py/hamming_distance_analysis.py)
-    secret_key_int = random.getrandbits(64)
-    secret_key = f"{secret_key_int:016x}"
 
     if args.verbose:
-        print(f"Secret key: {secret_key}")
+        print(f"Secret key: {args.secret_key}")
         print(f"Generating negatives: z={args.z}, u={args.u}")
         print(f"Collecting positives from: {args.output_root} (n={args.n}, u={args.u})")
 
@@ -497,7 +494,7 @@ def main():
 
     # 1) FPR: negative set distances
     neg_distances = generate_negative_distances(
-        n=args.n, u=args.u, z=args.z, seed=args.seed, secret_key=secret_key, verbose=args.verbose
+        n=args.n, u=args.u, z=args.z, seed=args.seed, secret_key=args.secret_key, verbose=args.verbose
     )
     if args.verbose:
         print(f"Collected {len(neg_distances)} negative distances")

@@ -23,6 +23,7 @@ def main():
     parser.add_argument("--n", type=int, default=16, help="Size of the code table")
     parser.add_argument("--u", type=int, default=100, help="Size of the codes")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--secret-key", type=str, default="25111915", help="Secret key used for watermarking and codebook generation (string)")
     parser.add_argument("--prompt", type=str, help="Custom prompt (uses random essay from dataset if not provided)")
     parser.add_argument("--dataset", type=str, nargs=4, default=["ChristophSchuhmann/essays-with-instructions", "default", "train", "instructions"], 
                         help="Hugging Face dataset to use for prompts. Format: '<org>/<dataset name>' '<subset>' '<split>' '<column>'. Default: 'ChristophSchuhmann/essays-with-instructions' 'default' 'train' 'instructions'")
@@ -60,11 +61,7 @@ def main():
         else:
             print(f"Device: {device} (CUDA not available, falling back to CPU)\n")
     
-    # Generate a deterministic 64-bit secret key based on seed
-    secret_key_int = random.getrandbits(64)
-    secret_key = f"{secret_key_int:016x}"  # Format as 16-character hex string
-    if args.verbose:
-        print(f"Generated seed based 64-bit secret key: {secret_key}\n")
+    print(f"Using secret key: {args.secret_key}\n")
 
     # Get dataset info
     dataset_name = args.dataset[0]
@@ -150,7 +147,7 @@ def main():
         model_name=args.model,
         n=args.n,
         u=args.u,
-        secret_key=secret_key,
+        secret_key=args.secret_key,
         green_list_fraction=args.green_fraction,
         bias=args.bias,
         seed=args.seed,
@@ -164,8 +161,7 @@ def main():
     codebook = CodebookManager(
         n=args.n,
         u=args.u,
-        secret_key=secret_key,
-        seed=args.seed
+        secret_key=args.secret_key
     )
 
     successful_watermark_recoveries = 0
@@ -222,7 +218,7 @@ def main():
         # Create decoder with same parameters
         decoder = LLMWatermarkDecoder(
             model_name=args.model,
-            secret_key=secret_key,
+            secret_key=args.secret_key,
             n=args.n,
             u=args.u,
             green_list_fraction=args.green_fraction,
@@ -329,7 +325,7 @@ def main():
         f.write(f"Number of prompts: {args.n_prompts}\n")
         f.write(f"Max tokens: {args.max_tokens}\n")
         f.write(f"Seed: {args.seed}\n")
-        f.write(f"Secret key: {secret_key}\n")
+        f.write(f"Secret key: {args.secret_key}\n")
         f.write(f"Green fraction: {args.green_fraction}\n")
         f.write(f"Bias: {args.bias}\n")
         f.write(f"Temperature: {args.temperature}\n")
