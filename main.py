@@ -165,9 +165,7 @@ def main():
     )
 
     successful_watermark_recoveries = 0
-    top_watermark_recoveries = 0
-    successful_hamming_distances = []  # For top 1 matches
-    top100_hamming_distances = []     # For top 100 matches
+    successful_hamming_distances = []  # For top-1 matches
     full_generation_prompts = 0        # Count prompts with full max-tokens generation
 
     for prompt_idx, prompt in enumerate(prompts, 0):
@@ -232,8 +230,6 @@ def main():
         decoding_time = time.time() - decoding_start
         
         codebook_search_time = 0
-        successful_code_matches = 0
-        top_code_matches = 0
 
         # Skip watermark recovery if generated text is shorter than max-tokens
         if len(generated_ids) < args.max_tokens:
@@ -250,45 +246,22 @@ def main():
         best_distance = None
         
         for block_idx, code_block in enumerate(code_blocks):
-            # Get the top 100 closest matches, handling potential None return
+            # Exact top-1 match using Faiss
             codebook_search_start = time.time()
-            matches = codebook.find_closest_matches(code_block, top=100)
+            closest_bits, closest_identity, dist = codebook.find_closest_match(code_block)
             codebook_search_time += time.time() - codebook_search_start
-            
-            if matches is None:
-                continue
 
-            # Track best top-1 candidate across blocks for CSV
-            top1_code, top1_identity, top1_distance = matches[0]
-            if (best_distance is None) or (top1_distance < best_distance):
-                best_distance = int(top1_distance)
-                best_identity = int(top1_identity)
+            # Track best candidate across blocks for CSV
+            if (best_distance is None) or (dist < best_distance):
+                best_distance = int(dist)
+                best_identity = int(closest_identity)
                 best_block_idx = block_idx
 
-            # Check if the correct code is in top 100
-            found_in_top = False
-            for i, (recovered_code, recovered_identity, hamming_distance) in enumerate(matches):
-                is_successful = np.array_equal(recovered_code, bit_code)
-                if is_successful:
-                    found_in_top = True
-                    # Record hamming distance for top 100 recoveries
-                    top100_hamming_distances.append(hamming_distance)
-                    if args.verbose:
-                        print(f"Successful recovery at position {i+1} with hamming distance: {hamming_distance}")
-                    if i == 0:  # First match (top 1)
-                        successful_code_matches += 1
-                        # Record hamming distance for successful (top 1) recoveries
-                        successful_hamming_distances.append(hamming_distance)
-                    break
-            
-            if found_in_top:
-                top_code_matches += 1
 
-        if successful_code_matches >= 1:
+        if best_identity is not None and best_identity == watermark_identity:
             successful_watermark_recoveries += 1
-            
-        if top_code_matches >= 1:
-            top_watermark_recoveries += 1
+            if best_distance is not None:
+                successful_hamming_distances.append(best_distance)
 
         # Append per-generation row to DataFrame (full-length generations only)
         bit_code_str = ''.join(map(str, bit_code))
@@ -340,13 +313,10 @@ def main():
         f.write(f"Total prompts processed: {total_prompts}\n")
         f.write(f"Prompts with full generation: {full_generation_prompts}\n")
         f.write(f"Successful watermark recoveries (top 1): {successful_watermark_recoveries} out of {full_generation_prompts}\n")
-        f.write(f"Watermark recoveries in top 100: {top_watermark_recoveries} out of {full_generation_prompts}\n")
         
         if full_generation_prompts > 0:
             success_rate = successful_watermark_recoveries / full_generation_prompts * 100
-            top100_rate = top_watermark_recoveries / full_generation_prompts * 100
             f.write(f"Success rate (top 1): {success_rate:.2f}%\n")
-            f.write(f"Success rate (top 100): {top100_rate:.2f}%\n")
         
         f.write("\n")
         
@@ -361,21 +331,9 @@ def main():
         else:
             f.write("No successful recoveries (top 1) to calculate hamming distance statistics\n")
         
-        f.write("\n")
-        
-        if top100_hamming_distances:
-            avg_top100_hamming = np.mean(top100_hamming_distances)
-            min_top100_hamming = np.min(top100_hamming_distances)
-            max_top100_hamming = np.max(top100_hamming_distances)
-            f.write(f"Average hamming distance for top 100 recoveries: {avg_top100_hamming:.2f}\n")
-            f.write(f"Min hamming distance for top 100 recoveries: {min_top100_hamming}\n")
-            f.write(f"Max hamming distance for top 100 recoveries: {max_top100_hamming}\n")
-        else:
-            f.write("No top 100 recoveries to calculate hamming distance statistics\n")
 
     print(f"Results saved to: {results_file}")
     print(f"Made {successful_watermark_recoveries} successful watermark recoveries out of {full_generation_prompts}")
-    print(f"Made {top_watermark_recoveries} watermark recoveries in top 100 out of {full_generation_prompts}")
     
     # Calculate and display average hamming distances
     if successful_hamming_distances:
@@ -383,12 +341,6 @@ def main():
         print(f"Average hamming distance for successful recoveries (top 1): {avg_successful_hamming:.2f}")
     else:
         print("No successful recoveries (top 1) to calculate average hamming distance")
-    
-    if top100_hamming_distances:
-        avg_top100_hamming = np.mean(top100_hamming_distances)
-        print(f"Average hamming distance for top 100 recoveries: {avg_top100_hamming:.2f}")
-    else:
-        print("No top 100 recoveries to calculate average hamming distance")
 
     # Save per-generation outputs (CSV and Parquet) alongside results.txt
     generations_csv = os.path.join(output_dir, "generations.csv")

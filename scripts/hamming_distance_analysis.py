@@ -225,16 +225,14 @@ def main():
         # Generate random bit sequence of length u
         random_sequence = [random.randint(0, 1) for _ in range(args.u)]
         
-        # Find closest match (top 1)
+        # Find closest match (exact top-1 via Faiss)
         try:
-            matches = codebook.find_closest_matches(random_sequence, top=1)
-            if matches:
-                _, _, hamming_distance = matches[0]
-                hamming_distances.append(hamming_distance)
-                sequence_data.append({
-                    'sequence_id': i,
-                    'hamming_distance': hamming_distance
-                })
+            _, _, hamming_distance = codebook.find_closest_match(random_sequence)
+            hamming_distances.append(hamming_distance)
+            sequence_data.append({
+                'sequence_id': i,
+                'hamming_distance': hamming_distance
+            })
         except Exception as e:
             if args.verbose:
                 print(f"Warning: Failed to process sequence {i}: {e}")

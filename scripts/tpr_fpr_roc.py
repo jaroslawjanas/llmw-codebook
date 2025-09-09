@@ -295,10 +295,9 @@ def generate_negative_distances(
     for _ in itr:
         # Generate random bit sequence of length u using local RNG
         seq = rng.integers(0, 2, size=u, dtype=np.uint8).tolist()
-        matches = codebook.find_closest_matches(seq, top=1)
-        if matches:
-            _, _, d = matches[0]
-            distances_list.append(int(d))
+        # Exact top-1 match using Faiss
+        _, _, d = codebook.find_closest_match(seq)
+        distances_list.append(int(d))
 
     distances = np.array(distances_list, dtype=np.int32)
 
