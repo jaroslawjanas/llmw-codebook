@@ -223,7 +223,8 @@ class CodebookManager:
         # Try load
         if os.path.exists(self.index_path):
             try:
-                index = faiss.read_index(self.index_path)
+                reader = getattr(faiss, "read_index_binary", None)
+                index = reader(self.index_path) if callable(reader) else faiss.read_index(self.index_path)
                 # Validate it's a binary index with matching dimension
                 if not hasattr(index, "d") or index.d != self.dim_bits:
                     raise ValueError("Index dimension mismatch or non-binary index file.")
@@ -241,7 +242,11 @@ class CodebookManager:
         # Faiss expects contiguous uint8 with shape (N, dim_bits/8)
         codes = np.ascontiguousarray(self.packed_codes, dtype=np.uint8)
         index.add(codes)
-        faiss.write_index(index, self.index_path)
+        writer_bin = getattr(faiss, "write_index_binary", None)
+        if callable(writer_bin):
+            writer_bin(index, self.index_path)
+        else:
+            faiss.write_index(index, self.index_path)
         print(f"Saved Faiss index to: {self.index_path} (ntotal={index.ntotal})")
         return index
 
