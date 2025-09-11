@@ -110,6 +110,12 @@ def main():
     
     stats_file = os.path.join(output_dir, "statistics.csv")
     stats_parquet_file = os.path.join(output_dir, "statistics.parquet")
+    generations_txt_file = os.path.join(output_dir, "generations.txt")
+    try:
+        with open(generations_txt_file, 'w', encoding='utf-8') as _f:
+            _f.write("")
+    except Exception as e:
+        print(f"Warning: Failed to initialize generations.txt: {e}")
     
     # Initialize per-generation outputs DataFrame (only full-length generations will be recorded)
     generations_columns = ["bit_code", "watermark", "encoded_bit_code", "retrieved_watermark", "successful_watermark", "bit_code_hamming_distance"]
@@ -239,6 +245,18 @@ def main():
         
         # Count prompts with full generation
         full_generation_prompts += 1
+
+        # Append to generations.txt for full-length generations
+        try:
+            with open(generations_txt_file, 'a', encoding='utf-8') as gf:
+                gf.write("==========\n")
+                gf.write(f"Prompt {prompt_idx+1}:\n")
+                gf.write(f"{prompt}\n\n")
+                gf.write("Generated:\n")
+                gf.write(f"{generated_text}\n")
+                gf.write("==========\n")
+        except Exception as e:
+            print(f"Warning: Failed to write generations.txt: {e}")
         
         # Track best top-1 match across all decoded blocks for this prompt
         best_block_idx = None
