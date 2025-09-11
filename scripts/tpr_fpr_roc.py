@@ -602,6 +602,107 @@ def save_roc_csv(save_dir: str, model: str, thresholds: np.ndarray, fpr: np.ndar
     return out_csv
 
 
+def generate_power_of_ten_ticks(fpr_min: float, fpr_max: float):
+    """
+    Generate power-of-ten ticks 10^p between [fpr_min, fpr_max] inclusive, where possible.
+    Returns (ticks, labels, exponents).
+    """
+    fpr_min = float(fpr_min)
+    fpr_max = float(fpr_max)
+    if fpr_min <= 0 or fpr_max <= 0:
+        raise ValueError("fpr_min and fpr_max must be > 0 for power-of-ten ticks")
+    if fpr_min > fpr_max:
+        fpr_min, fpr_max = fpr_max, fpr_min
+
+    log_min = np.log10(fpr_min)
+    log_max = np.log10(fpr_max)
+    # Use tiny epsilon to handle exact powers cleanly
+    p_start = int(np.ceil(log_min - 1e-12))
+    p_end = int(np.floor(log_max + 1e-12))
+    if p_start > p_end:
+        # Degenerate window: include the nearest power to fpr_min
+        p_start = int(np.round(log_min))
+        p_end = p_start
+    exponents = list(range(p_start, p_end + 1))
+    ticks = [10.0 ** p for p in exponents]
+    # Format labels using Unicode superscripts, e.g., 10⁻⁴ instead of 10^-4
+    sup = {"-":"⁻","0":"⁰","1":"¹","2":"²","3":"³","4":"⁴","5":"⁵","6":"⁶","7":"⁷","8":"⁸","9":"⁹"}
+    def to_superscript(num: int) -> str:
+        s = str(int(num))
+        return "".join(sup.get(ch, ch) for ch in s)
+    labels = [f"10{to_superscript(p)}" for p in exponents]
+    return ticks, labels, exponents
+
+
+def thresholds_for_fpr_ticks(fpr_array: np.ndarray, thresholds_array: np.ndarray, ticks: List[float]) -> List[int]:
+    """
+    Map each target FPR tick to the smallest threshold such that FPR(threshold) >= tick.
+    Clamps to endpoints if tick is out of range.
+    """
+    fpr_arr = fpr_array.astype(float)
+    idxs = np.searchsorted(fpr_arr, np.array(ticks, dtype=float), side="left")
+    idxs = np.clip(idxs, 0, len(thresholds_array) - 1)
+    return thresholds_array[idxs].astype(int).tolist()
+
+
+def save_table_image(save_dir: str, n: int, u: int, z: int,
+                     model_names: List[str], tick_labels: List[str],
+                     hd_values: List[int], tpr_rows: List[List[float]]) -> str:
+    """
+    Render a table as a PNG:
+      - Header row: Model + FPR ticks (10^p labels)
+      - Second row: HD + thresholds for each tick
+      - One row per model with TPR at each tick as percentages
+    """
+    # Prepare cell text
+    header = ["FPR"] + tick_labels
+    hd_row = ["HD Threshold"] + [str(int(v)) for v in hd_values]
+
+    # Format TPR rows as percentages with one decimal
+    tpr_str_rows = [[f"{(val * 100.0):.1f}%" if np.isfinite(val) else "NA" for val in row] for row in tpr_rows]
+
+    cell_text = [header, hd_row]
+    for model, vals in zip(model_names, tpr_str_rows):
+        cell_text.append([model] + vals)
+
+    num_cols = len(header)
+    num_rows = len(cell_text)
+
+    # Figure sizing heuristics
+    fig_w = max(6.0, 1.1 * num_cols + 1.0)  # widen with more columns
+    fig_h = max(3.0, 0.55 * num_rows + 0.5)  # height scales with rows
+
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    ax.axis("off")
+
+    # Column widths: wider first column
+    if num_cols > 1:
+        other_w = 0.65 / (num_cols - 1)
+        col_widths = [0.35] + [other_w] * (num_cols - 1)
+    else:
+        col_widths = [1.0]
+
+    table = ax.table(cellText=cell_text, cellLoc="center", colWidths=col_widths, loc="center")
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1.0, 1.2)
+
+    # Style header (no shading)
+    for j in range(num_cols):
+        cell = table[(0, j)]
+        cell.set_text_props(weight="bold")
+    # Style HD label
+    table[(1, 0)].set_text_props(weight="bold")
+
+    ax.set_title(f"TPR at power-of-ten FPR ticks with HD thresholds\n(n={n}, u={u}, negatives z={z})", fontsize=10, pad=10)
+    fig.tight_layout()
+
+    out_path = os.path.join(save_dir, f"roc_table_n{n}_u{u}_z{z}.png")
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
 def main():
     parser = argparse.ArgumentParser(description="Construct ROC curves (TPR/FPR) for models and report TPR@1%%FPR")
     parser.add_argument("--n", type=int, default=16, help="Size of the code table (2^n entries)")
@@ -622,9 +723,9 @@ def main():
                         help="Axis scaling for plots: linear (default), logx (log FPR), symlogx (log FPR with linear region near 0), loglog (log FPR and TPR)")
     parser.add_argument("--x-eps", dest="x_eps", type=float, default=None,
                         help="Small epsilon used when plotting FPR=0 on log axes. Default auto-computed.")
-    parser.add_argument("--fpr-min", dest="fpr_min", type=float, default=None,
-                        help="Minimum FPR for x-axis limits (useful with --scale logx/symlogx).")
-    parser.add_argument("--fpr-max", dest="fpr_max", type=float, default=None,
+    parser.add_argument("--fpr-min", dest="fpr_min", type=float, default=1e-4,
+                        help="Minimum FPR for x-axis limits (default 1e-4; useful with --scale logx/symlogx).")
+    parser.add_argument("--fpr-max", dest="fpr_max", type=float, default=1.0,
                         help="Maximum FPR for x-axis limits (default 1.0).")
 
     args = parser.parse_args()
@@ -703,6 +804,27 @@ def main():
         scale=args.scale, x_eps=args.x_eps, fpr_min=args.fpr_min, fpr_max=args.fpr_max
     )
     print(f"Combined ROC saved to: {combined_path}")
+
+    # Table image at power-of-ten FPR ticks with HD row
+    try:
+        ticks, tick_labels, _ = generate_power_of_ten_ticks(args.fpr_min, args.fpr_max)
+        # Reference arrays from any model (FPR is based on negatives, same across models)
+        ref_model = next(iter(model_to_curves))
+        ref_thresholds, ref_fpr, _, _ = model_to_curves[ref_model]
+        hd_values = thresholds_for_fpr_ticks(ref_fpr, ref_thresholds, ticks)
+
+        # Per-model TPR at ticks
+        model_names = sorted(model_to_curves.keys())
+        tpr_rows = []
+        for m in model_names:
+            _, fpr_arr, tpr_arr, _ = model_to_curves[m]
+            vals = [interpolate_tpr_at_fpr(fpr_arr, tpr_arr, t)[0] for t in ticks]
+            tpr_rows.append(vals)
+
+        table_path = save_table_image(run_save_dir, args.n, args.u, args.z, model_names, tick_labels, hd_values, tpr_rows)
+        print(f"ROC table saved to: {table_path}")
+    except Exception as e:
+        print(f"Warning: failed to generate table image: {e}")
 
     # Optional: show plots interactively (if not in headless environment)
     if not args.no_show:
