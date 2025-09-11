@@ -109,7 +109,6 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
     
     stats_file = os.path.join(output_dir, "statistics.csv")
-    stats_parquet_file = os.path.join(output_dir, "statistics.parquet")
     generations_txt_file = os.path.join(output_dir, "generations.txt")
     try:
         with open(generations_txt_file, 'w', encoding='utf-8') as _f:
@@ -365,17 +364,12 @@ def main():
     else:
         print("No successful recoveries (top 1) to calculate average hamming distance")
 
-    # Save per-generation outputs (CSV and Parquet) alongside results.txt
+    # Save per-generation outputs (CSV) alongside results.txt
     generations_csv = os.path.join(output_dir, "generations.csv")
-    generations_parquet = os.path.join(output_dir, "generations.parquet")
     try:
         generations_df.to_csv(generations_csv, index=False)
     except Exception as e:
         print(f"Warning: Failed to save CSV: {e}")
-    try:
-        generations_df.to_parquet(generations_parquet, index=False)
-    except Exception as e:
-        print(f"Warning: Failed to save Parquet: {e}")
 
 if __name__ == "__main__":
     main()

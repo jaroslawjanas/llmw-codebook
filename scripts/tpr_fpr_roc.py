@@ -91,24 +91,11 @@ def parse_results_txt(run_dir: str) -> Optional[Dict[str, str]]:
 
 def load_generations_df(run_dir: str, verbose: bool = False) -> Optional[pd.DataFrame]:
     """
-    Load generations.parquet if available else generations.csv.
-    Returns None if neither exists or load fails.
+    Load generations.csv.
+    Returns None if not found or load fails.
     """
-    parquet_path = os.path.join(run_dir, "generations.parquet")
     csv_path = os.path.join(run_dir, "generations.csv")
 
-    # Prefer Parquet
-    if os.path.isfile(parquet_path):
-        try:
-            df = pd.read_parquet(parquet_path)
-            if verbose:
-                print(f"Loaded {parquet_path} ({len(df)} rows)")
-            return df
-        except Exception as e:
-            if verbose:
-                print(f"Warning: Failed to read parquet {parquet_path}: {e}")
-
-    # Fallback to CSV
     if os.path.isfile(csv_path):
         try:
             df = pd.read_csv(csv_path)
