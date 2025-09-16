@@ -35,7 +35,7 @@ from matplotlib.ticker import FuncFormatter
 
 from tqdm import tqdm
 import src.paths as paths
-from src.codebook import CodebookManager
+from src.codebook import CodebookRNG, CodebookBCH
 
 
 def ensure_dirs(*dirs: str) -> None:
@@ -192,24 +192,35 @@ def generate_negative_distances(
     z: int,
     seed: int,
     secret_key: str,
+    codebook: str,
+    bch_t: Optional[int],
+    bch_m: Optional[int],
     verbose: bool = False,
 ) -> np.ndarray:
     """
     Generate or load cached negative distances (Hamming distances of random sequences to the closest code).
     Caching strategy:
-      - Exact hit: load cache file for (n,u,z,seed,secret_key).
-      - Downsample: if a larger cache exists with same (n,u,seed,secret_key) and z_big >= z,
+      - Exact hit: load cache file for (n,u,z,seed,secret_key,codebook).
+      - Downsample: if a larger cache exists with same (n,u,seed,secret_key,codebook) and z_big >= z,
         deterministically sample z entries without replacement, save the exact cache, and return.
       - Miss: generate with a local seeded RNG, save, and return.
+    The cache key includes the codebook family and BCH params to avoid mixing results across algorithms.
     """
     # Ensure paths setup for caches
     paths.ensure_directories()
     os.makedirs(paths.SCRIPTS_CACHE_DIR, exist_ok=True)
 
     sk_clean = sanitize_filename(secret_key)
+    if codebook == "rng":
+        cb_tag = "rng"
+    else:
+        # Note: we include provided parameters; if auto, include 'auto' in tag to reflect resolution
+        t_tag = "auto" if bch_t is None else str(bch_t)
+        m_tag = "auto" if bch_m is None else str(bch_m)
+        cb_tag = f"bch_m{m_tag}_t{t_tag}"
 
     def build_cache_path(z_val: int) -> str:
-        fname = f"negative_distances_z{z_val}_s{seed}_n{n}_u{u}_sk{sk_clean}.npz"
+        fname = f"negative_distances_z{z_val}_s{seed}_n{n}_u{u}_cb{cb_tag}_sk{sk_clean}.npz"
         return os.path.join(paths.SCRIPTS_CACHE_DIR, fname)
 
     exact_path = build_cache_path(z)
@@ -220,14 +231,14 @@ def generate_negative_distances(
             with np.load(exact_path) as npz:
                 distances = npz["distances"].astype(np.int32, copy=False)
             if distances.shape[0] == z:
-                print(f"Loaded negative distances from cache: {exact_path} (z={z}, seed={seed}, n={n}, u={u}, sk={secret_key})")
+                print(f"Loaded negative distances from cache: {exact_path} (z={z}, seed={seed}, n={n}, u={u}, cb={cb_tag}, sk={secret_key})")
                 return distances
         except Exception:
             # Corrupt cache, fall through to search/generate
             pass
 
-    # 2) Try larger cache for downsampling
-    pattern = re.compile(rf"^negative_distances_z(\d+)_s{seed}_n{n}_u{u}_sk{re.escape(sk_clean)}\.npz$")
+    # 2) Try larger cache for downsampling (same codebook tag)
+    pattern = re.compile(rf"^negative_distances_z(\d+)_s{seed}_n{n}_u{u}_cb{re.escape(cb_tag)}_sk{re.escape(sk_clean)}\.npz$")
     best_path = None
     best_z = -1
     try:
@@ -259,19 +270,27 @@ def generate_negative_distances(
                     np.savez_compressed(exact_path, distances=distances.astype(np.int32, copy=False))
                 except Exception:
                     pass
-                print(f"Loaded larger cache and downsampled {big.shape[0]}→{z} from {best_path}; wrote: {exact_path}")
+                print(f"Loaded larger cache and downsampled {best_z}→{z} from {best_path}; wrote: {exact_path}")
                 return distances
         except Exception:
             # Fall back to generation
             pass
 
     # 3) Generate from scratch with a local seeded RNG (independent of global state)
-    codebook = CodebookManager(
-        n=n,
-        u=u,
-        secret_key=secret_key,
-        # Let CodebookManager use default cache dir (paths.CODEBOOKS_CACHE_DIR)
-    )
+    if codebook == "rng":
+        cb = CodebookRNG(
+            n=n,
+            u=u,
+            secret_key=secret_key,
+        )
+    else:
+        cb = CodebookBCH(
+            n=n,
+            u=u,
+            secret_key=secret_key,
+            t=bch_t,
+            m=bch_m,
+        )
 
     distances_list: List[int] = []
     itr = range(z)
@@ -283,7 +302,7 @@ def generate_negative_distances(
         # Generate random bit sequence of length u using local RNG
         seq = rng.integers(0, 2, size=u, dtype=np.uint8).tolist()
         # Exact top-1 match using Faiss
-        _, _, d = codebook.find_closest_match(seq)
+        _, _, d = cb.find_closest_match(seq)
         distances_list.append(int(d))
 
     distances = np.array(distances_list, dtype=np.int32)
@@ -712,6 +731,9 @@ def main():
     parser.add_argument("--tmax", type=int, default=None, help="Maximum Hamming threshold (inclusive). Defaults to u.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--secret-key", type=str, default="25111915", help="Secret key used for codebook generation (string)")
+    parser.add_argument("--codebook", type=str, choices=["rng", "bch"], default="rng", help="Codebook type for negatives: 'rng' or 'bch'")
+    parser.add_argument("--bch-t", type=int, default=None, help="BCH designed error-correction parameter t (if None, auto-choose the largest t with k >= n)")
+    parser.add_argument("--bch-m", type=int, default=None, help="BCH field degree m (n0=2^m-1). If None, minimal m with n0 >= u is chosen")
     parser.add_argument("--fpr-target", type=float, default=0.01, help="Target FPR for reporting TPR (default=0.01)")
     parser.add_argument("--output-root", type=str, default="output", help="Root directory containing model run outputs")
     parser.add_argument("--save-dir", type=str, default=os.path.join("scripts", "output"), help="Directory to save plots/CSVs")
@@ -746,10 +768,9 @@ def main():
     random.seed(args.seed)
     np.random.seed(args.seed)
 
-
     if args.verbose:
         print(f"Secret key: {args.secret_key}")
-        print(f"Generating negatives: z={args.z}, u={args.u}")
+        print(f"Generating negatives: z={args.z}, u={args.u}, codebook={args.codebook}")
         print(f"Collecting positives from: {args.output_root} (n={args.n}, u={args.u})")
 
     # Resolve threshold range
@@ -763,7 +784,8 @@ def main():
 
     # 1) FPR: negative set distances
     neg_distances = generate_negative_distances(
-        n=args.n, u=args.u, z=args.z, seed=args.seed, secret_key=args.secret_key, verbose=args.verbose
+        n=args.n, u=args.u, z=args.z, seed=args.seed, secret_key=args.secret_key,
+        codebook=args.codebook, bch_t=args.bch_t, bch_m=args.bch_m, verbose=args.verbose
     )
     if args.verbose:
         print(f"Collected {len(neg_distances)} negative distances")

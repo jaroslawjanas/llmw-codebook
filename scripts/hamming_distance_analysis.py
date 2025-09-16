@@ -28,7 +28,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy import stats
 from scipy.optimize import curve_fit
-from src.codebook import CodebookManager
+from src.codebook import CodebookRNG, CodebookBCH
 from tqdm import tqdm
 
 
@@ -180,6 +180,9 @@ def main():
     parser.add_argument("--z", type=int, default=1000, help="Number of random sequences to test")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--secret-key", type=str, default="25111915", help="Secret key used for codebook generation (string)")
+    parser.add_argument("--codebook", type=str, choices=["rng", "bch"], default="rng", help="Codebook type for analysis negatives: 'rng' or 'bch'")
+    parser.add_argument("--bch-t", type=int, default=None, help="BCH t (if None, auto-choose largest t with k >= n)")
+    parser.add_argument("--bch-m", type=int, default=None, help="BCH m (n0=2^m-1). If None, minimal m with n0 >= u")
     parser.add_argument("--verbose", action="store_true", help="Show detailed output and progress information")
     parser.add_argument("--output-dir", type=str, help="Output directory (auto-generated if not provided)")
     parser.add_argument("--no-plots", action="store_true", help="Skip plot generation")
@@ -206,13 +209,23 @@ def main():
     if args.verbose:
         print(f"Output directory: {output_dir}")
 
-    # Create codebook manager
-    codebook = CodebookManager(
-        n=args.n,
-        u=args.u,
-        secret_key=args.secret_key,
-        npz_dir=output_dir
-    )
+    # Create codebook
+    if args.codebook == "rng":
+        codebook = CodebookRNG(
+            n=args.n,
+            u=args.u,
+            secret_key=args.secret_key,
+            npz_dir=output_dir
+        )
+    else:
+        codebook = CodebookBCH(
+            n=args.n,
+            u=args.u,
+            secret_key=args.secret_key,
+            t=args.bch_t,
+            m=args.bch_m,
+            npz_dir=output_dir
+        )
 
     # Generate random sequences and find closest matches
     hamming_distances = []

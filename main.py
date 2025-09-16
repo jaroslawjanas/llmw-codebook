@@ -10,7 +10,7 @@ from datetime import datetime
 import src.paths as paths
 from src.utils import get_shuffled_essays
 from src.llm_watermark import LLMWatermarkEncoder, LLMWatermarkDecoder
-from src.codebook import CodebookManager
+from src.codebook import CodebookRNG, CodebookBCH
 from tqdm import tqdm
 
 
@@ -24,6 +24,9 @@ def main():
     parser.add_argument("--u", type=int, default=100, help="Size of the codes")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--secret-key", type=str, default="25111915", help="Secret key used for watermarking and codebook generation (string)")
+    parser.add_argument("--codebook", type=str, choices=["rng", "bch"], default="rng", help="Codebook type: 'rng' (random baseline) or 'bch' (BCH-based)")
+    parser.add_argument("--bch-t", type=int, default=None, help="BCH designed error-correction parameter t (if None, auto-choose the largest t with k >= n)")
+    parser.add_argument("--bch-m", type=int, default=None, help="BCH field degree m (n0=2^m-1). If None, minimal m with n0 >= u is chosen")
     parser.add_argument("--prompt", type=str, help="Custom prompt (uses random essay from dataset if not provided)")
     parser.add_argument("--dataset", type=str, nargs=4, default=["ChristophSchuhmann/essays-with-instructions", "default", "train", "instructions"], 
                         help="Hugging Face dataset to use for prompts. Format: '<org>/<dataset name>' '<subset>' '<split>' '<column>'. Default: 'ChristophSchuhmann/essays-with-instructions' 'default' 'train' 'instructions'")
@@ -163,11 +166,20 @@ def main():
         verbose=args.verbose
     )
 
-    codebook = CodebookManager(
-        n=args.n,
-        u=args.u,
-        secret_key=args.secret_key
-    )
+    if args.codebook == "rng":
+        codebook = CodebookRNG(
+            n=args.n,
+            u=args.u,
+            secret_key=args.secret_key
+        )
+    else:
+        codebook = CodebookBCH(
+            n=args.n,
+            u=args.u,
+            secret_key=args.secret_key,
+            t=args.bch_t,
+            m=args.bch_m
+        )
 
     successful_watermark_recoveries = 0
     successful_hamming_distances = []  # For top-1 matches
