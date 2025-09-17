@@ -53,6 +53,7 @@ from typing import List, Tuple, Optional
 
 import numpy as np
 import faiss  # Faiss (CPU) is required and used unconditionally
+from tqdm import tqdm
 
 import src.paths as paths
 
@@ -332,7 +333,7 @@ class CodebookRNG(CodebookBase):
     def generate_codewords(self) -> np.ndarray:
         table_size = 2 ** self.n
         bits = np.zeros((table_size, self.u), dtype=np.uint8)
-        for i in range(table_size):
+        for i in tqdm(range(table_size), desc="Generating RNG codewords", unit="cw"):
             seed_material = f"{self.secret_key}:{i}".encode("utf-8")
             digest = hashlib.sha256(seed_material).digest()
             identity_seed = int.from_bytes(digest[:8], "big")
@@ -473,7 +474,7 @@ class CodebookBCH(CodebookBase):
         codewords = np.zeros((table_size, self.u), dtype=np.uint8)
 
         # Build and encode for each watermark
-        for i in range(table_size):
+        for i in tqdm(range(table_size), desc="Encoding BCH codewords", unit="cw"):
             # k-bit message: first n bits are watermark (big-endian), remainder zeros
             msg = np.zeros(resolved_k, dtype=np.uint8)
             msg[: self.n] = self._int_to_bits(i, self.n)
