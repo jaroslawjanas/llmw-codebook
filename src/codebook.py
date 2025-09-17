@@ -426,9 +426,10 @@ class CodebookBCH(CodebookBase):
         resolved_t = None
         resolved_k = None
         if self.t is not None:
-            bch = galois.BCH(n0, t=int(self.t))
+            d = 2*int(self.t) + 1
+            bch = galois.BCH(n0, d=d)
             if bch.k < self.n:
-                raise ValueError(f"Provided t={self.t} yields k={bch.k} < n={self.n}. Decrease t or increase m.")
+                raise ValueError(f"Provided t={self.t} (d={d}) yields k={bch.k} < n={self.n}. Decrease t or increase m.")
             resolved_t = int(self.t)
             resolved_k = int(bch.k)
         else:
@@ -438,14 +439,15 @@ class CodebookBCH(CodebookBase):
             bch = None
             for t_candidate in range(t_max, 0, -1):
                 try:
-                    bch_candidate = galois.BCH(n0, t=t_candidate)
+                    d = 2*t_candidate + 1
+                    bch_candidate = galois.BCH(n0, d=d)
                     if bch_candidate.k >= self.n:
                         bch = bch_candidate
                         resolved_t = t_candidate
                         resolved_k = int(bch_candidate.k)
                         break
                 except Exception:
-                    # Some t may be invalid for a given n0; skip
+                    # Some d may be invalid for a given n0; skip
                     continue
             if bch is None:
                 raise RuntimeError(
