@@ -17,7 +17,7 @@ from tqdm import tqdm
 def main():
     parser = argparse.ArgumentParser(description="LLM Text Watermarking based on Lagrange Interpolation")
     parser.add_argument("--model", type=str, default="facebook/opt-125m", help="Model to use")
-    parser.add_argument("--max-tokens", type=int, default=100, help="Maximum tokens to generate")
+    parser.add_argument("--max-tokens", type=int, default=None, help="Maximum tokens to generate (default: match --u)")
     parser.add_argument("--green-fraction", type=float, default=0.5, help="Fraction of tokens in green list")
     parser.add_argument("--bias", type=float, default=6.0, help="Bias to add to green/red tokens")
     parser.add_argument("--n", type=int, default=16, help="Size of the code table")
@@ -68,12 +68,15 @@ def main():
     
     print(f"Using secret key: {args.secret_key}\n")
 
-    # Ensure max tokens is a multiple of u for block encoding
-    effective_max_tokens = args.max_tokens
-    if effective_max_tokens % args.u != 0:
-        new_max = ((effective_max_tokens + args.u - 1) // args.u) * args.u
-        print(f"Note: --max-tokens ({effective_max_tokens}) is not divisible by u={args.u}. Adjusting to {new_max}.")
-        effective_max_tokens = new_max
+    # Determine effective max tokens: default to u when not provided, and ensure multiple of u
+    if args.max_tokens is None:
+        effective_max_tokens = args.u
+    else:
+        effective_max_tokens = args.max_tokens
+        if effective_max_tokens % args.u != 0:
+            new_max = ((effective_max_tokens + args.u - 1) // args.u) * args.u
+            print(f"Note: --max-tokens ({effective_max_tokens}) is not divisible by u={args.u}. Adjusting to {new_max}.")
+            effective_max_tokens = new_max
 
     # Get dataset info
     dataset_name = args.dataset[0]
@@ -343,7 +346,7 @@ def main():
         f.write(f"n (code table size): {args.n}\n")
         f.write(f"u (code size): {args.u}\n")
         f.write(f"Number of prompts: {args.n_prompts}\n")
-        f.write(f"Max tokens (requested): {args.max_tokens}\n")
+        f.write(f"Max tokens (requested): {args.max_tokens if args.max_tokens is not None else 'None (default -> u)'}\n")
         f.write(f"Max tokens (effective): {effective_max_tokens}\n")
         f.write(f"Seed: {args.seed}\n")
         f.write(f"Secret key: {args.secret_key}\n")
