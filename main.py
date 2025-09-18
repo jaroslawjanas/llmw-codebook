@@ -39,6 +39,8 @@ def main():
     parser.add_argument("--verbose", action="store_true", help="Show detailed output and progress information")
     parser.add_argument("--stats", action="store_true", help="Show statistics summary in console (statistics are always saved to file)")
     parser.add_argument("--force-tokenization", action="store_true", help="Force detokenization and retokenization of text for decoding instead of using token IDs directly")
+    parser.add_argument("--workers", type=int, default=4, help="Number of worker processes for codebook generation (default: 4)")
+    parser.add_argument("--chunk-rows", type=int, default=None, help="Optional override for generation chunk size in rows. If not set, auto policy is used.")
 
     args = parser.parse_args()
 
@@ -65,6 +67,13 @@ def main():
             print(f"Device: {device} (CUDA not available, falling back to CPU)\n")
     
     print(f"Using secret key: {args.secret_key}\n")
+
+    # Ensure max tokens is a multiple of u for block encoding
+    effective_max_tokens = args.max_tokens
+    if effective_max_tokens % args.u != 0:
+        new_max = ((effective_max_tokens + args.u - 1) // args.u) * args.u
+        print(f"Note: --max-tokens ({effective_max_tokens}) is not divisible by u={args.u}. Adjusting to {new_max}.")
+        effective_max_tokens = new_max
 
     # Get dataset info
     dataset_name = args.dataset[0]
@@ -98,7 +107,7 @@ def main():
     
     total_prompts = len(prompts)
     if args.verbose:
-        print(f"Generating {args.max_tokens} tokens per prompt with watermarking...")
+        print(f"Generating {effective_max_tokens} tokens per prompt with watermarking...")
         print(f"Using dataset: {dataset_name}")
         print(f"Processing {total_prompts} prompt(s) with model: {args.model}")
 
@@ -170,7 +179,9 @@ def main():
         codebook = CodebookRNG(
             n=args.n,
             u=args.u,
-            secret_key=args.secret_key
+            secret_key=args.secret_key,
+            workers=args.workers,
+            chunk_rows=args.chunk_rows
         )
     else:
         codebook = CodebookBCH(
@@ -178,7 +189,9 @@ def main():
             u=args.u,
             secret_key=args.secret_key,
             t=args.bch_t,
-            m=args.bch_m
+            m=args.bch_m,
+            workers=args.workers,
+            chunk_rows=args.chunk_rows
         )
 
     successful_watermark_recoveries = 0
@@ -207,7 +220,7 @@ def main():
         full_text, generated_text, generated_ids, formatted_prompt, generation_statistics, watermark_blocks_info = watermarker.generate_text(
             prompt=prompt,
             bit_code=bit_code,
-            max_new_tokens=args.max_tokens,
+            max_new_tokens=effective_max_tokens,
             verbose=args.verbose
         )
         encoding_time = time.time() - encoding_start
@@ -254,9 +267,9 @@ def main():
         codebook_search_time = 0
 
         # Skip watermark recovery if generated text is shorter than max-tokens
-        if len(generated_ids) < args.max_tokens:
+        if len(generated_ids) < effective_max_tokens:
             if args.verbose:
-                print(f"Skipping watermark recovery: generated {len(generated_ids)} tokens < {args.max_tokens} max tokens")
+                print(f"Skipping watermark recovery: generated {len(generated_ids)} tokens < {effective_max_tokens} max tokens")
             continue
         
         # Count prompts with full generation
@@ -330,7 +343,8 @@ def main():
         f.write(f"n (code table size): {args.n}\n")
         f.write(f"u (code size): {args.u}\n")
         f.write(f"Number of prompts: {args.n_prompts}\n")
-        f.write(f"Max tokens: {args.max_tokens}\n")
+        f.write(f"Max tokens (requested): {args.max_tokens}\n")
+        f.write(f"Max tokens (effective): {effective_max_tokens}\n")
         f.write(f"Seed: {args.seed}\n")
         f.write(f"Secret key: {args.secret_key}\n")
         f.write(f"Green fraction: {args.green_fraction}\n")

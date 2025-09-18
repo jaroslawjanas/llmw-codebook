@@ -2,12 +2,18 @@
 """
 Codebook generation and exact Hamming top-1 search with Faiss (Binary Index)
 
+Parallel generation
+- Work is split into fixed-size portions (chunks of rows).
+- A process pool (default 4 workers) generates packed byte chunks concurrently.
+- Parent process drains results and writes them into the final packed matrix.
+- Progress is shown with a tqdm progress bar.
+
 Overview
 - We provide a small hierarchy that separates "how codewords are generated" from the
   common mechanics (caching, byte-packing, Faiss exact Hamming search, API).
 - Two implementations:
-  1) CodebookRNG: reproduces the existing deterministic RNG-based codeword generation
-     per watermark identity, driven by the secret_key (baseline).
+  1) CodebookRNG: deterministic RNG-based codeword generation per watermark identity,
+     driven by the secret_key (baseline).
   2) CodebookBCH: generates codewords from a binary BCH code to increase separation
      (Hamming distance) between different watermarks.
 
@@ -48,14 +54,149 @@ We keep the API focused on exact top-1 search via Faiss IndexBinaryFlat.
 """
 
 import os
+import math
 import hashlib
 from typing import List, Tuple, Optional
 
 import numpy as np
-import faiss  # Faiss (CPU) is required and used unconditionally
+import faiss  # Faiss (CPU) is required and used
 from tqdm import tqdm
+from multiprocessing import Pool
 
 import src.paths as paths
+
+
+# -------------------------------
+# Helpers shared by workers
+# -------------------------------
+
+def _derive_seed(secret_key: str, tag: str) -> int:
+    """
+    Derive a 64-bit seed from (secret_key, tag).
+    """
+    h = hashlib.sha256(f"{secret_key}|{tag}".encode("utf-8")).digest()
+    return int.from_bytes(h[:8], "big", signed=False)
+
+
+def _int_to_bits(value: int, length: int) -> np.ndarray:
+    """
+    Convert integer 'value' to a big-endian bit array of given 'length' (uint8 {0,1}).
+    """
+    bits = np.zeros(length, dtype=np.uint8)
+    for i in range(length):
+        bits[i] = (value >> (length - 1 - i)) & 1
+    return bits
+
+
+def _pack_bits_2d_local(bits_01: np.ndarray, u: int) -> np.ndarray:
+    """
+    Local packbits for worker results: pack (R, u) into (R, B) with big-endian, zero-pad to a multiple of 8 bits.
+    """
+    remainder = u % 8
+    if remainder != 0:
+        pad = 8 - remainder
+        bits_01 = np.pad(bits_01, pad_width=((0, 0), (0, pad)), mode="constant", constant_values=0)
+    return np.packbits(bits_01, axis=1, bitorder="big").astype(np.uint8, copy=False)
+
+
+# -------------------------------
+# RNG worker (top-level for Windows pickling)
+# -------------------------------
+
+def _rng_chunk_worker(args: Tuple[int, int, int, str]) -> Tuple[int, np.ndarray]:
+    """
+    Generate RNG-based codewords for a chunk [start, end), pack into bytes, and return (start, packed_chunk).
+    args: (start, end, u, secret_key)
+    """
+    start, end, u, secret_key = args
+    rows = end - start
+    bits = np.empty((rows, u), dtype=np.uint8)
+    for offset, i in enumerate(range(start, end)):
+        seed_material = f"{secret_key}:{i}".encode("utf-8")
+        digest = hashlib.sha256(seed_material).digest()
+        identity_seed = int.from_bytes(digest[:8], "big")
+        rng = np.random.default_rng(identity_seed)
+        bits[offset] = rng.integers(0, 2, size=u, dtype=np.uint8)
+    packed = _pack_bits_2d_local(bits, u)
+    return start, packed
+
+
+# -------------------------------
+# BCH workers (initializer + worker) - top-level for Windows pickling
+# -------------------------------
+
+_BCH = None
+_BCH_k = None
+_BCH_perm = None
+_BCH_mask = None
+_BCH_n = None
+_BCH_u = None
+
+
+def _bch_pool_init(n: int, u: int, secret_key: str, m: int, t: int, permute: bool, xor_mask: bool) -> None:
+    """
+    Per-process initializer: build BCH, permutation and mask once in each worker process.
+    """
+    global _BCH, _BCH_k, _BCH_perm, _BCH_mask, _BCH_n, _BCH_u
+    _BCH_n = int(n)
+    _BCH_u = int(u)
+    n0 = (2 ** m) - 1
+    d = 2 * int(t) + 1
+
+    # Import galois inside worker to avoid requiring it when not using BCH codebook
+    import galois  # type: ignore
+
+    _BCH = galois.BCH(n0, d=d)
+    _BCH_k = int(_BCH.k)
+
+    # Permutation over n0 positions
+    if permute:
+        perm_rng = np.random.default_rng(_derive_seed(secret_key, "bch-permutation"))
+        permutation = np.arange(n0, dtype=np.int64)
+        perm_rng.shuffle(permutation)
+        _BCH_perm = permutation
+    else:
+        _BCH_perm = np.arange(n0, dtype=np.int64)
+
+    # XOR mask of length u
+    if xor_mask:
+        mask_rng = np.random.default_rng(_derive_seed(secret_key, "bch-mask"))
+        _BCH_mask = mask_rng.integers(0, 2, size=_BCH_u, dtype=np.uint8)
+    else:
+        _BCH_mask = None
+
+
+def _bch_chunk_worker(args: Tuple[int, int]) -> Tuple[int, np.ndarray]:
+    """
+    Generate BCH-based codewords for a chunk [start, end), pack into bytes, and return (start, packed_chunk).
+    Uses globals initialized by _bch_pool_init.
+    """
+    global _BCH, _BCH_k, _BCH_perm, _BCH_mask, _BCH_n, _BCH_u
+    start, end = args
+    rows = end - start
+    bits = np.empty((rows, _BCH_u), dtype=np.uint8)
+
+    for offset, i in enumerate(range(start, end)):
+        # k-bit message: first n bits are watermark (big-endian), remainder zeros
+        msg = np.zeros(_BCH_k, dtype=np.uint8)
+        msg[:_BCH_n] = _int_to_bits(i, _BCH_n)
+
+        # Encode -> length n0
+        cw_full = _BCH.encode(msg)  # type: ignore[attr-defined]
+        cw_full = np.array(cw_full, dtype=np.uint8)
+
+        # Permute then puncture to u
+        cw_perm = cw_full[_BCH_perm]
+        cw_u = cw_perm[:_BCH_u]
+
+        # Optional XOR mask
+        if _BCH_mask is not None:
+            cw_u = np.bitwise_xor(cw_u, _BCH_mask)
+
+        bits[offset] = cw_u
+
+    packed = _pack_bits_2d_local(bits, _BCH_u)
+    return start, packed
 
 
 class CodebookBase:
@@ -66,22 +207,34 @@ class CodebookBase:
     - building/loading a Faiss IndexBinaryFlat for exact Hamming top-1 search,
     - public API methods: get_random_row() and find_closest_match().
 
-    Subclasses implement:
-    - _algorithm_tag(): str  -> short string for filenames (e.g., 'rng', 'bch_m8_t7')
-    - generate_codewords(): np.ndarray (2**n, u) of dtype uint8 with values {0,1}
+    Subclasses implicitly define:
+    - Algorithm tag via _algorithm_tag()
+    - Generation mode (RNG or BCH) used to select worker functions
     """
 
-    def __init__(self, n: int, u: int, secret_key: str, npz_dir: Optional[str] = ""):
+    def __init__(
+        self,
+        n: int,
+        u: int,
+        secret_key: str,
+        npz_dir: Optional[str] = "",
+        workers: int = 4,
+        chunk_rows: Optional[int] = None,
+    ):
         """
         Args:
             n: number of bits in watermark identities; table size is 2**n (watermarks 0..2**n-1)
             u: length (in bits) of each codeword
             secret_key: secret string controlling deterministic codebook generation
             npz_dir: optional custom directory for storing the codebook .npz (defaults to paths.CODEBOOKS_CACHE_DIR)
+            workers: number of parallel worker processes to use for generation (default: 4)
+            chunk_rows: optional override for the chunk size in rows (default: auto policy)
         """
         self.n = int(n)
         self.u = int(u)
         self.secret_key = str(secret_key)
+        self.workers = max(1, int(workers))
+        self.chunk_rows = None if chunk_rows is None else max(1, int(chunk_rows))
 
         # Resolve cache paths with algorithm tag to avoid collisions
         self.filename_base = self._get_filename_base()
@@ -112,13 +265,6 @@ class CodebookBase:
         """
         Short, filesystem-friendly identifier that encodes the algorithm and important params.
         Example: 'rng' or 'bch_m8_t7'
-        """
-        raise NotImplementedError
-
-    def generate_codewords(self) -> np.ndarray:
-        """
-        Generate codewords of shape (2**n, u) as 0/1 uint8 array.
-        Each row corresponds to the codeword for a watermark in [0, 2**n).
         """
         raise NotImplementedError
 
@@ -157,7 +303,7 @@ class CodebookBase:
 
         # Generate new codebook
         print(f"Generating new codebook: {self.filename_base}")
-        packed_codes, watermark_identities = self._generate_packed_arrays()
+        packed_codes, watermark_identities = self._generate_packed_arrays_parallel()
 
         # Save packed arrays
         np.savez_compressed(self.npz_path, packed_codes=packed_codes, watermark_identities=watermark_identities, u=self.u)
@@ -165,31 +311,75 @@ class CodebookBase:
 
         return packed_codes, watermark_identities
 
-    def _generate_packed_arrays(self) -> Tuple[np.ndarray, np.ndarray]:
+    def _default_chunk_rows(self) -> int:
         """
-        Generate watermark identities and their codewords bits, then pack into bytes.
+        Default chunk size policy: target ~4 MiB of raw 0/1 bit storage per chunk.
+        rows ~= 4*MiB / u. Clamp to [4096, 262144] to keep throughput/RAM balanced.
+        """
+        target_bytes = 4 * 1024 * 1024
+        rows = max(4096, min(262144, target_bytes // max(1, self.u)))
+        return int(rows)
+
+    def _generate_packed_arrays_parallel(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Parallel generation of packed codewords:
+        - Split rows [0..N) into chunks of chunk_rows
+        - Use a process pool to generate each chunk as packed bytes
+        - Assemble into a preallocated (N, B) uint8 array
 
         Returns:
             packed_codes: ndarray (N, B) uint8
             watermark_identities: ndarray (N,) int64
         """
-        table_size = 2 ** self.n
-        print(f"Generating codebook with {table_size} entries...")
+        N = 2 ** self.n
+        B = (self.u + 7) // 8
 
-        watermark_identities = np.arange(table_size, dtype=np.int64)
+        # Note: For future optimization, we can consider a memory-mapped array (numpy.memmap)
+        # to stream chunks directly to disk (to further lower peak RAM). Not necessary now.
+        packed_codes = np.empty((N, B), dtype=np.uint8)
 
-        # Delegate codeword generation to subclass
-        codeword_bits = self.generate_codewords()  # shape (N, u), dtype uint8 {0,1}
+        watermark_identities = np.arange(N, dtype=np.int64)
+        chunk_rows = self.chunk_rows or self._default_chunk_rows()
+        if chunk_rows <= 0:
+            chunk_rows = self._default_chunk_rows()
 
-        if not (isinstance(codeword_bits, np.ndarray) and codeword_bits.shape == (table_size, self.u) and codeword_bits.dtype == np.uint8):
-            raise ValueError("generate_codewords() must return np.ndarray of shape (2**n, u) and dtype uint8 with values {0,1}")
+        # Prepare chunk ranges
+        chunks: List[Tuple[int, int]] = []
+        for start in range(0, N, chunk_rows):
+            end = min(N, start + chunk_rows)
+            chunks.append((start, end))
 
-        # Pack 0/1 bits into bytes; if u not divisible by 8, right-pad with zeros
-        packed_codes = self._pack_bits_2d(codeword_bits, self.u)
+        # Select worker strategy based on subclass
+        is_rng = isinstance(self, CodebookRNG)
+        is_bch = isinstance(self, CodebookBCH)
 
-        # Free large matrix ASAP (let GC handle if references remain)
-        del codeword_bits
+        # Progress bar over total rows
+        progress = tqdm(total=N, desc=f"Generating {self._algorithm_tag()} codewords (workers={self.workers})", unit="cw")
 
+        if is_rng:
+            # RNG workers don't need an initializer
+            args_iter = ((start, end, self.u, self.secret_key) for (start, end) in chunks)
+            with Pool(processes=self.workers) as pool:
+                for start, packed_chunk in pool.imap_unordered(_rng_chunk_worker, args_iter, chunksize=1):
+                    end = start + packed_chunk.shape[0]
+                    packed_codes[start:end] = packed_chunk
+                    progress.update(end - start)
+
+        elif is_bch:
+            # Resolve BCH parameters in parent, then pass to initializer
+            # (We resolve m,t,k exactly as in the original logic)
+            resolved_m, resolved_t, resolved_k = self._resolve_bch_parameters()
+            initargs = (self.n, self.u, self.secret_key, resolved_m, resolved_t, self.permute, self.xor_mask)
+            with Pool(processes=self.workers, initializer=_bch_pool_init, initargs=initargs) as pool:
+                for start, packed_chunk in pool.imap_unordered(_bch_chunk_worker, chunks, chunksize=1):
+                    end = start + packed_chunk.shape[0]
+                    packed_codes[start:end] = packed_chunk
+                    progress.update(end - start)
+        else:
+            progress.close()
+            raise RuntimeError("Unknown codebook subclass: expected CodebookRNG or CodebookBCH.")
+
+        progress.close()
         return packed_codes, watermark_identities
 
     @staticmethod
@@ -325,11 +515,14 @@ class CodebookRNG(CodebookBase):
     """
     Deterministic RNG-based codewords (reproduces the existing behavior).
     For each watermark i, seed a local RNG with SHA256(secret_key : i) and draw u bits.
+
+    Note: Generation is now parallelized in the base class via chunked workers.
     """
 
     def _algorithm_tag(self) -> str:
         return "rng"
 
+    # Keeping this method for reference/backwards discussion; not used by the new parallel path.
     def generate_codewords(self) -> np.ndarray:
         table_size = 2 ** self.n
         bits = np.zeros((table_size, self.u), dtype=np.uint8)
@@ -368,12 +561,14 @@ class CodebookBCH(CodebookBase):
         permute: bool = True,
         xor_mask: bool = True,
         npz_dir: Optional[str] = "",
+        workers: int = 4,
+        chunk_rows: Optional[int] = None,
     ):
         self.t = t
         self.m = m
         self.permute = bool(permute)
         self.xor_mask = bool(xor_mask)
-        super().__init__(n=n, u=u, secret_key=secret_key, npz_dir=npz_dir)
+        super().__init__(n=n, u=u, secret_key=secret_key, npz_dir=npz_dir, workers=workers, chunk_rows=chunk_rows)
 
     def _algorithm_tag(self) -> str:
         # Use provided params in tag; actual resolved values are printed at build time
@@ -381,32 +576,13 @@ class CodebookBCH(CodebookBase):
         m_tag = str(self.m) if self.m is not None else "auto"
         return f"bch_m{m_tag}_t{t_tag}"
 
-    @staticmethod
-    def _int_to_bits(value: int, length: int) -> np.ndarray:
+    def _resolve_bch_parameters(self) -> Tuple[int, int, int]:
         """
-        Convert integer 'value' to a big-endian bit array of given 'length' (uint8 {0,1}).
+        Resolve BCH parameters (m, t, k) with the same semantics as before:
+        - If m not provided, choose minimal m s.t. n0 >= u
+        - If t not provided, choose largest t s.t. k >= n
+        Returns (resolved_m, resolved_t, resolved_k)
         """
-        bits = np.zeros(length, dtype=np.uint8)
-        for i in range(length):
-            # Fill from MSB to LSB (big-endian): position i corresponds to bit (length-1-i)
-            bits[i] = (value >> (length - 1 - i)) & 1
-        return bits
-
-    def _derive_seed(self, tag: str) -> int:
-        """
-        Derive a 64-bit seed from (secret_key, tag).
-        """
-        h = hashlib.sha256(f"{self.secret_key}|{tag}".encode("utf-8")).digest()
-        return int.from_bytes(h[:8], "big", signed=False)
-
-    def _derive_mask_bits(self, length: int) -> np.ndarray:
-        """
-        Derive a deterministic 0/1 mask of given length from the secret key.
-        """
-        rng = np.random.default_rng(self._derive_seed("bch-mask"))
-        return rng.integers(0, 2, size=length, dtype=np.uint8)
-
-    def generate_codewords(self) -> np.ndarray:
         try:
             import galois  # local import to avoid hard dependency when using RNG
         except Exception as e:
@@ -427,7 +603,7 @@ class CodebookBCH(CodebookBase):
         resolved_t = None
         resolved_k = None
         if self.t is not None:
-            d = 2*int(self.t) + 1
+            d = 2 * int(self.t) + 1
             bch = galois.BCH(n0, d=d)
             if bch.k < self.n:
                 raise ValueError(f"Provided t={self.t} (d={d}) yields k={bch.k} < n={self.n}. Decrease t or increase m.")
@@ -435,12 +611,11 @@ class CodebookBCH(CodebookBase):
             resolved_k = int(bch.k)
         else:
             # Try descending t to find the largest that still gives k >= n
-            # Set an upper bound; t cannot exceed n0//2. A practical small cap keeps search quick.
             t_max = min(n0 // 2, 64)
             bch = None
             for t_candidate in range(t_max, 0, -1):
                 try:
-                    d = 2*t_candidate + 1
+                    d = 2 * t_candidate + 1
                     bch_candidate = galois.BCH(n0, d=d)
                     if bch_candidate.k >= self.n:
                         bch = bch_candidate
@@ -456,50 +631,14 @@ class CodebookBCH(CodebookBase):
                     f"Try increasing m or decreasing n."
                 )
 
-        print(f"BCH parameters resolved: m={m} (n0={n0}), t={resolved_t}, k={resolved_k}, d_min >= {2*resolved_t+1}")
-
-        # Prepare permutation Π over n0 positions (derived from secret key), if enabled
-        if self.permute:
-            perm_rng = np.random.default_rng(self._derive_seed("bch-permutation"))
-            permutation = np.arange(n0, dtype=np.int64)
-            perm_rng.shuffle(permutation)
-        else:
-            permutation = np.arange(n0, dtype=np.int64)
-
-        # Prepare XOR mask of length u (derived from secret key), if enabled
-        mask = self._derive_mask_bits(self.u) if self.xor_mask else None
-
-        # Generate codewords
-        table_size = 2 ** self.n
-        codewords = np.zeros((table_size, self.u), dtype=np.uint8)
-
-        # Build and encode for each watermark
-        for i in tqdm(range(table_size), desc="Encoding BCH codewords", unit="cw"):
-            # k-bit message: first n bits are watermark (big-endian), remainder zeros
-            msg = np.zeros(resolved_k, dtype=np.uint8)
-            msg[: self.n] = self._int_to_bits(i, self.n)
-
-            # BCH encode -> GF2 array length n0
-            cw_full = bch.encode(msg)  # type: ignore[attr-defined]
-            cw_full = np.array(cw_full, dtype=np.uint8)  # convert to 0/1 uint8
-
-            # Apply permutation, then puncture to u bits
-            cw_perm = cw_full[permutation]
-            cw_u = cw_perm[: self.u]
-
-            # Optional secret-key XOR mask (does not change Hamming distances)
-            if mask is not None:
-                cw_u = np.bitwise_xor(cw_u, mask)
-
-            codewords[i] = cw_u
-
-        return codewords
+        print(f"BCH parameters resolved: m={m} (n0={n0}), t={resolved_t}, k={resolved_k}, d_min >= {2 * resolved_t + 1}")
+        return m, resolved_t, resolved_k
 
 
-# Backward-incompatible change: we no longer export CodebookManager.
-# Update callers to import and instantiate either CodebookRNG or CodebookBCH as needed.
+# Backward-incompatible note: the generation is now chunked and parallelized.
+# Callers should import and instantiate CodebookRNG or CodebookBCH as needed.
 # Example:
 #   from src.codebook import CodebookRNG, CodebookBCH
-#   codebook = CodebookRNG(n=n, u=u, secret_key=secret_key)
+#   codebook = CodebookRNG(n=n, u=u, secret_key=secret_key, workers=4)
 #   # or
-#   codebook = CodebookBCH(n=n, u=u, secret_key=secret_key, t=7)  # for example
+#   codebook = CodebookBCH(n=n, u=u, secret_key=secret_key, t=7, workers=4)  # for example
