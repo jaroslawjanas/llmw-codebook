@@ -204,7 +204,7 @@ def main():
         output_dir = args.output_dir
     else:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir = os.path.join("output", f"hamming_analysis_n{args.n}_u{args.u}_z{args.z}_{timestamp}")
+        output_dir = os.path.join("scripts", "output", f"hamming_analysis_n{args.n}_u{args.u}_z{args.z}_{timestamp}")
         
     os.makedirs(output_dir, exist_ok=True)
     if args.verbose:
