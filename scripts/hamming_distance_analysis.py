@@ -29,6 +29,7 @@ import seaborn as sns
 from scipy import stats
 from scipy.optimize import curve_fit
 from src.codebook import CodebookRNG, CodebookBCH
+import src.paths as paths
 from tqdm import tqdm
 
 
@@ -215,7 +216,7 @@ def main():
             n=args.n,
             u=args.u,
             secret_key=args.secret_key,
-            npz_dir=output_dir
+            npz_dir=paths.CODEBOOKS_CACHE_DIR
         )
     else:
         codebook = CodebookBCH(
@@ -224,7 +225,7 @@ def main():
             secret_key=args.secret_key,
             t=args.bch_t,
             m=args.bch_m,
-            npz_dir=output_dir
+            npz_dir=paths.CODEBOOKS_CACHE_DIR
         )
 
     # Generate random sequences and find closest matches
