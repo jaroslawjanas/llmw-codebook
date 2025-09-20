@@ -446,6 +446,7 @@ def plot_per_model(
     n: int,
     u: int,
     z: int,
+    cb_tag: str,
     scale: str = "linear",
     x_eps: Optional[float] = None,
     fpr_min: Optional[float] = None,
@@ -491,13 +492,13 @@ def plot_per_model(
         x_max = fpr_max if fpr_max is not None else 1.0
         ax.set_xlim(x_min, x_max)
 
-    ax.plot(fpr_plot, tpr_plot, label=f"{model} (TPR@{int(fpr_target*100)}%FPR={tpr_at_target*100:.1f}%)", linewidth=2)
+    ax.plot(fpr_plot, tpr_plot, label=f"{model} (TPR@{int(fpr_target*100)}%FPR={tpr_at_target*100:.1f}%, cb={cb_tag})", linewidth=2)
     # Mark the target point
     ax.scatter([fpr_target if s == "linear" else max(fpr_target, eps)], [tpr_at_target], color="red", s=30, zorder=5)
 
     ax.set_xlabel("False Positive Rate (FPR)")
     ax.set_ylabel("True Positive Rate (TPR)")
-    ax.set_title(f"ROC — {model}\n(n={n}, u={u}, negatives z={z})")
+    ax.set_title(f"ROC — {model}\n(n={n}, u={u}, negatives z={z}, cb={cb_tag})")
     if s != "loglog":
         ax.set_ylim(0.0, 1.0)
     ax.grid(True, alpha=0.3)
@@ -506,7 +507,7 @@ def plot_per_model(
 
     model_clean = sanitize_filename(model)
     scale_suffix = f"_{s}" if s != "linear" else ""
-    out_path = os.path.join(save_dir, f"roc_{model_clean}_n{n}_u{u}_z{z}{scale_suffix}.png")
+    out_path = os.path.join(save_dir, f"roc_{model_clean}_n{n}_u{u}_z{z}_cb-{cb_tag}{scale_suffix}.png")
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
     return out_path
@@ -519,6 +520,7 @@ def plot_combined(
     n: int,
     u: int,
     z: int,
+    cb_tag: str,
     scale: str = "linear",
     x_eps: Optional[float] = None,
     fpr_min: Optional[float] = None,
@@ -589,13 +591,13 @@ def plot_combined(
             fpr_plot, tpr_plot = fpr, tpr
             target_x, target_y = fpr_target, tpr_at_target
 
-        label = f"{model} (TPR@{int(fpr_target*100)}%FPR={tpr_at_target*100:.1f}%)"
+        label = f"{model} (TPR@{int(fpr_target*100)}%FPR={tpr_at_target*100:.1f}%, cb={cb_tag})"
         ax.plot(fpr_plot, tpr_plot, linewidth=2, label=label)
         ax.scatter([target_x], [target_y], s=25)
 
     ax.set_xlabel("False Positive Rate (FPR)")
     ax.set_ylabel("True Positive Rate (TPR)")
-    ax.set_title(f"ROC (Combined)\n(n={n}, u={u}, negatives z={z})")
+    ax.set_title(f"ROC (Combined)\n(n={n}, u={u}, negatives z={z}, cb={cb_tag})")
     if s != "loglog":
         ax.set_ylim(0.0, 1.0)
     ax.grid(True, alpha=0.3)
@@ -603,15 +605,15 @@ def plot_combined(
     fig.tight_layout()
 
     scale_suffix = f"_{s}" if s != "linear" else ""
-    out_path = os.path.join(save_dir, f"roc_combined_n{n}_u{u}_z{z}{scale_suffix}.png")
+    out_path = os.path.join(save_dir, f"roc_combined_n{n}_u{u}_z{z}_cb-{cb_tag}{scale_suffix}.png")
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
     return out_path
 
 
-def save_roc_csv(save_dir: str, model: str, thresholds: np.ndarray, fpr: np.ndarray, tpr: np.ndarray, n: int, u: int, z: int) -> str:
+def save_roc_csv(save_dir: str, model: str, thresholds: np.ndarray, fpr: np.ndarray, tpr: np.ndarray, n: int, u: int, z: int, cb_tag: str) -> str:
     model_clean = sanitize_filename(model)
-    out_csv = os.path.join(save_dir, f"roc_points_{model_clean}_n{n}_u{u}_z{z}.csv")
+    out_csv = os.path.join(save_dir, f"roc_points_{model_clean}_n{n}_u{u}_z{z}_cb-{cb_tag}.csv")
     df = pd.DataFrame({
         "threshold": thresholds.astype(int),
         "FPR": fpr.astype(float),
@@ -666,7 +668,7 @@ def thresholds_for_fpr_ticks(fpr_array: np.ndarray, thresholds_array: np.ndarray
 
 def save_table_image(save_dir: str, n: int, u: int, z: int,
                      model_names: List[str], tick_labels: List[str],
-                     hd_values: List[int], tpr_rows: List[List[float]]) -> str:
+                     hd_values: List[int], tpr_rows: List[List[float]], cb_tag: str) -> str:
     """
     Render a table as a PNG:
       - Header row: Model + FPR ticks (10^p labels)
@@ -713,10 +715,10 @@ def save_table_image(save_dir: str, n: int, u: int, z: int,
     # Style HD label
     table[(1, 0)].set_text_props(weight="bold")
 
-    ax.set_title(f"TPR at power-of-ten FPR ticks with HD thresholds\n(n={n}, u={u}, negatives z={z})", fontsize=10, pad=10)
+    ax.set_title(f"TPR at power-of-ten FPR ticks with HD thresholds\n(n={n}, u={u}, negatives z={z}, cb={cb_tag})", fontsize=10, pad=10)
     fig.tight_layout()
 
-    out_path = os.path.join(save_dir, f"roc_table_n{n}_u{u}_z{z}.png")
+    out_path = os.path.join(save_dir, f"roc_table_n{n}_u{u}_z{z}_cb-{cb_tag}.png")
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
     return out_path
@@ -758,7 +760,7 @@ def main():
 
     # Create timestamped run subfolder under save-dir
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir_name = f"tpr_fpr_roc_n{args.n}_u{args.u}_z{args.z}_{timestamp}"
+    run_dir_name = f"tpr_fpr_roc_n{args.n}_u{args.u}_z{args.z}_cb-{args.codebook}_{timestamp}"
     run_save_dir = os.path.join(args.save_dir, run_dir_name)
     ensure_dirs(run_save_dir)
     if args.verbose:
@@ -811,10 +813,10 @@ def main():
         model_to_curves[model] = (thresholds, fpr, tpr, tpr_at_target)
 
         # Save per-model ROC CSV and plot
-        csv_path = save_roc_csv(run_save_dir, model, thresholds, fpr, tpr, args.n, args.u, args.z)
+        csv_path = save_roc_csv(run_save_dir, model, thresholds, fpr, tpr, args.n, args.u, args.z, args.codebook)
         png_path = plot_per_model(
             model, thresholds, fpr, tpr, tpr_at_target, args.fpr_target,
-            run_save_dir, args.n, args.u, args.z,
+            run_save_dir, args.n, args.u, args.z, args.codebook,
             scale=args.scale, x_eps=args.x_eps, fpr_min=args.fpr_min, fpr_max=args.fpr_max
         )
 
@@ -822,7 +824,7 @@ def main():
 
     # 5) Combined plot
     combined_path = plot_combined(
-        model_to_curves, args.fpr_target, run_save_dir, args.n, args.u, args.z,
+        model_to_curves, args.fpr_target, run_save_dir, args.n, args.u, args.z, args.codebook,
         scale=args.scale, x_eps=args.x_eps, fpr_min=args.fpr_min, fpr_max=args.fpr_max
     )
     print(f"Combined ROC saved to: {combined_path}")
@@ -843,7 +845,7 @@ def main():
             vals = [interpolate_tpr_at_fpr(fpr_arr, tpr_arr, t)[0] for t in ticks]
             tpr_rows.append(vals)
 
-        table_path = save_table_image(run_save_dir, args.n, args.u, args.z, model_names, tick_labels, hd_values, tpr_rows)
+        table_path = save_table_image(run_save_dir, args.n, args.u, args.z, model_names, tick_labels, hd_values, tpr_rows, args.codebook)
         print(f"ROC table saved to: {table_path}")
     except Exception as e:
         print(f"Warning: failed to generate table image: {e}")

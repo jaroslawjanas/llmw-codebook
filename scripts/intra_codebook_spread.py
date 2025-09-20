@@ -75,7 +75,8 @@ def main():
         output_dir = args.output_dir
     else:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir = os.path.join("scripts", "output", f"intra_codebook_spread_n{args.n}_u{args.u}_z{args.z}_{timestamp}")
+        cb_tag = f"cb-{args.codebook}"
+        output_dir = os.path.join("scripts", "output", f"intra_codebook_spread_n{args.n}_u{args.u}_z{args.z}_{cb_tag}_{timestamp}")
     os.makedirs(output_dir, exist_ok=True)
     if args.verbose:
         print(f"Output directory: {output_dir}")
@@ -177,9 +178,10 @@ def main():
             fig, ax = plt.subplots(figsize=(6, 5))
             ax.boxplot(nn_arr, vert=True, patch_artist=True, boxprops=dict(facecolor='lightblue', alpha=0.7))
             ax.set_ylabel('Nearest Neighbor Hamming Distance')
-            ax.set_title(f'Intra-Codebook 1-NN Distances (n={args.n}, u={args.u}, z={z_eff})')
+            ax.set_title(f'Intra-Codebook 1-NN Distances (n={args.n}, u={args.u}, z={z_eff}, cb={args.codebook})')
             ax.grid(True, alpha=0.3)
-            plot_path = os.path.join(output_dir, 'boxplot_nn_distances.png')
+            cb_tag = f"cb-{args.codebook}"
+            plot_path = os.path.join(output_dir, f'boxplot_nn_distances_{cb_tag}.png')
             fig.tight_layout()
             fig.savefig(plot_path, dpi=200, bbox_inches='tight')
             plt.close(fig)

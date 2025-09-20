@@ -74,7 +74,7 @@ def create_analysis_plots(distances, args, output_dir):
     
     # Create figure with subplots
     fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-    fig.suptitle(f'Hamming Distance Analysis (n={args.n}, u={args.u}, z={args.z})', 
+    fig.suptitle(f'Hamming Distance Analysis (n={args.n}, u={args.u}, z={args.z}, cb={args.codebook})',
                  fontsize=16, fontweight='bold')
     
     # 1. Histogram with multiple fits
@@ -83,7 +83,7 @@ def create_analysis_plots(distances, args, output_dir):
     # Create histogram
     n_bins = min(50, max(20, int(np.sqrt(len(distances)))))
     counts, bin_edges, _ = ax1.hist(distances, bins=n_bins, alpha=0.7, color='skyblue', 
-                                   edgecolor='black', linewidth=0.5, density=True)
+                                   edgecolor='black', linewidth=0.5, density=True, label=f'Histogram (cb={args.codebook})')
     
     bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
     
@@ -144,7 +144,8 @@ def create_analysis_plots(distances, args, output_dir):
     ax4.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plot_path = os.path.join(output_dir, 'hamming_distribution_analysis.png')
+    cb_tag = f"cb-{args.codebook}"
+    plot_path = os.path.join(output_dir, f'hamming_distribution_analysis_{cb_tag}.png')
     plt.savefig(plot_path, dpi=300, bbox_inches='tight')
     plt.close()
     
@@ -204,7 +205,8 @@ def main():
         output_dir = args.output_dir
     else:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir = os.path.join("scripts", "output", f"hamming_analysis_n{args.n}_u{args.u}_z{args.z}_{timestamp}")
+        cb_tag = f"cb-{args.codebook}"
+        output_dir = os.path.join("scripts", "output", f"hamming_analysis_n{args.n}_u{args.u}_z{args.z}_{cb_tag}_{timestamp}")
         
     os.makedirs(output_dir, exist_ok=True)
     if args.verbose:
@@ -310,6 +312,9 @@ def main():
         'z': args.z,
         'seed': args.seed,
         'secret_key': args.secret_key,
+        'codebook': args.codebook,
+        'bch_t': args.bch_t,
+        'bch_m': args.bch_m,
         'timestamp': datetime.now().isoformat(),
         'statistics': stats_dict,
         'theoretical_mean': theoretical_mean,
