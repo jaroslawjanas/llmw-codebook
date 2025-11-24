@@ -169,8 +169,11 @@ class HammingCodebookBase(CodebookBase):
 
         dim_bits = int(self.bytes_per_code * 8)
         self.dim_bits = dim_bits
-        index = faiss.IndexBinaryFlat(dim_bits)  # type: ignore
-        index.add(self.packed_codes)
+
+        # Ensure contiguous uint8 codes for Faiss and quiet static typing complaints.
+        codes = np.ascontiguousarray(self.packed_codes, dtype=np.uint8)
+        index: Any = faiss.IndexBinaryFlat(dim_bits)  # type: ignore[attr-defined]
+        index.add(codes)
         if self.index_path is not None:
             writer = getattr(faiss, "write_index_binary", None)
             if callable(writer):
