@@ -134,29 +134,6 @@ def main():
     # Initialize per-generation outputs DataFrame (only full-length generations will be recorded)
     generations_columns = ["bit_code", "watermark", "encoded_bit_code", "retrieved_watermark", "successful_watermark", "bit_code_hamming_distance"]
     generations_df = pd.DataFrame(columns=generations_columns)
-    
-    # Initialize DataFrame with all required columns
-    columns = [
-        "n", "u", "prompt", "generated_text", "tokens_length", "secret_key", "properly_encoded_tokens",
-        "watermark_recovered", "encoding_time", "decoding_time", "codebook_search_time"
-    ]
-    
-    # Define explicit column types for proper data handling
-    column_dtypes = {
-        "n": "int64",
-        "u": "int64",
-        "prompt": "string",
-        "generated_text": "string", 
-        "tokens_length": "int64",
-        "secret_key": "string",
-        "properly_encoded_tokens": "int64",
-        "watermark_recovered": "boolean",
-        "encoding_time": "float64",
-        "decoding_time": "float64",
-        "codebook_search_time": "float64"
-    }
-    
-    stats_df = pd.DataFrame(index=range(total_prompts), columns=columns)
 
     #----------------------------------------#
     #              Watermarking              #
@@ -199,6 +176,8 @@ def main():
     successful_watermark_recoveries = 0
     successful_hamming_distances = []  # For top-1 matches
     full_generation_prompts = 0        # Count prompts with full max-tokens generation
+    properly_encoded_tokens = 0  # Across full-length generations only
+    total_tokens_generated = 0   # Across full-length generations only
 
     for prompt_idx, prompt in enumerate(prompts, 0):
 
@@ -276,6 +255,10 @@ def main():
         
         # Count prompts with full generation
         full_generation_prompts += 1
+
+        # Accumulate properly encoded token stats for full-length generations
+        properly_encoded_tokens+= generation_statistics.get("properly_encoded_tokens", 0)
+        total_tokens_generated += generation_statistics.get("total_tokens_generated", 0)
 
         # Append to generations.txt for full-length generations
         try:
@@ -367,6 +350,13 @@ def main():
         if full_generation_prompts > 0:
             success_rate = successful_watermark_recoveries / full_generation_prompts * 100
             f.write(f"Success rate (top 1): {success_rate:.2f}%\n")
+        
+        # Properly encoded tokens summary across full-length generations
+        if total_tokens_generated > 0:
+            pct_proper = properly_encoded_tokens / total_tokens_generated * 100
+        else:
+            pct_proper = 0.0
+        f.write(f"Properly encoded tokens: {properly_encoded_tokens} / {total_tokens_generated} ({pct_proper:.2f}%)\n")
         
         f.write("\n")
         
