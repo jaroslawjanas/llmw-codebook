@@ -1,25 +1,20 @@
 """
 Codebook package initialization.
 
-Provides access to codeword generators and Hamming-based codebook implementations.
+Exports:
+- CodebookBase: canonical base codebook (NPZ) generator/loader
+- CodebookHamming: FAISS-backed Hamming distance search consuming the base codebook
+- Generators: RNGCodewordGenerator, BCHCodewordGenerator (pluggable strategies)
 """
 
+from .base import CodebookBase
+from .hamming import CodebookHamming
 from .generation import CodewordGenerator, RNGCodewordGenerator, BCHCodewordGenerator
-from .hamming import (
-    HammingCodebookBase,
-    HammingCodebookRNG,
-    HammingCodebookBCH,
-    CodebookRNG,
-    CodebookBCH,
-)
 
 __all__ = [
+    "CodebookBase",
+    "CodebookHamming",
     "CodewordGenerator",
     "RNGCodewordGenerator",
     "BCHCodewordGenerator",
-    "HammingCodebookBase",
-    "HammingCodebookRNG",
-    "HammingCodebookBCH",
-    "CodebookRNG",
-    "CodebookBCH",
 ]

@@ -30,7 +30,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 
-from src.codebook import CodebookRNG, CodebookBCH
+from src.codebooks import CodebookBase, CodebookHamming, RNGCodewordGenerator, BCHCodewordGenerator
 import src.paths as paths
 
 
@@ -83,21 +83,21 @@ def main():
 
     # Build/load codebook (caches under cache/codebooks)
     if args.codebook == "rng":
-        codebook = CodebookRNG(
-            n=args.n,
-            u=args.u,
-            secret_key=args.secret_key,
-            npz_dir=paths.CODEBOOKS_CACHE_DIR,
-        )
+        generator_cls = RNGCodewordGenerator
+        generator_kwargs = {}
     else:
-        codebook = CodebookBCH(
-            n=args.n,
-            u=args.u,
-            secret_key=args.secret_key,
-            t=args.bch_t,
-            m=args.bch_m,
-            npz_dir=paths.CODEBOOKS_CACHE_DIR,
-        )
+        generator_cls = BCHCodewordGenerator
+        generator_kwargs = {"t": args.bch_t, "m": args.bch_m}
+
+    base = CodebookBase(
+        n=args.n,
+        u=args.u,
+        secret_key=args.secret_key,
+        generator_cls=generator_cls,
+        generator_kwargs=generator_kwargs,
+        cache_dir=paths.CODEBOOKS_CACHE_DIR,
+    )
+    codebook = CodebookHamming(base)
 
     # Number of identities in codebook
     N = 2 ** args.n
@@ -114,7 +114,9 @@ def main():
 
     # Query nearest neighbor excluding self:
     # Search for top-2; if the top-1 is self, take top-2
-    queries = np.ascontiguousarray(codebook.packed_codes[sample_ids], dtype=np.uint8)
+    assert codebook.base.packed_codes is not None, "Base codebook packed_codes not loaded"
+    assert codebook.index is not None, "Faiss index not initialized"
+    queries = np.ascontiguousarray(codebook.base.packed_codes[sample_ids], dtype=np.uint8)
     D, I = codebook.index.search(queries, 2)  # (z_eff, 2)
 
     rows = []

@@ -9,7 +9,7 @@ import random
 import torch
 import numpy as np
 import time
-from typing import List, Tuple, Dict, Optional, Union
+from typing import List, Tuple, Dict, Optional, Union, Any
 from abc import ABC, abstractmethod
 from itertools import combinations
 from transformers import (
@@ -327,7 +327,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         bit_code: List[int],
         max_new_tokens: int, 
         verbose: bool = True
-    ) -> Tuple[str, str, List[int], str, Dict[str, int], List[int]]:
+    ) -> Tuple[str, str, List[int], str, Dict[str, int], List[Dict[str, Any]]]:
         """
         Generate text with Lagrange interpolation watermarking.
         
@@ -561,7 +561,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         super().__init__(model_name, secret_key, n, u, green_list_fraction, seed, cache_dir, device, verbose)
 
         
-    def decode_text(self, generated_text: str = None, generated_ids: List[int] = None) -> List[Dict[str, Union[int, List[int]]]]:
+    def decode_text(self, generated_text: str = None, generated_ids: List[int] = None) -> Tuple[List[List[int]], int]:
         """
         Decode watermark information from generated text or pre-tokenized IDs.
         

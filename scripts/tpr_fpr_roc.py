@@ -21,7 +21,7 @@ import argparse
 import random
 import zlib
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, TypedDict
 
 # 1) Compute the project root (one level up from scripts/)
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
@@ -35,7 +35,7 @@ from matplotlib.ticker import FuncFormatter
 
 from tqdm import tqdm
 import src.paths as paths
-from src.codebook import CodebookRNG, CodebookBCH
+from src.codebooks import CodebookBase, CodebookHamming, RNGCodewordGenerator, BCHCodewordGenerator
 
 
 def ensure_dirs(*dirs: str) -> None:
@@ -48,7 +48,13 @@ def sanitize_filename(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_\-]+", "-", name)
 
 
-def parse_results_txt(run_dir: str) -> Optional[Dict[str, str]]:
+class RunMeta(TypedDict):
+    model: str
+    n: int
+    u: int
+
+
+def parse_results_txt(run_dir: str) -> Optional[RunMeta]:
     """
     Extract canonical model name and n/u from results.txt within a run directory.
     Returns dict with keys: model, n, u. Returns None if not found or parse error.
@@ -86,7 +92,7 @@ def parse_results_txt(run_dir: str) -> Optional[Dict[str, str]]:
     if model is None or n_val is None or u_val is None:
         return None
 
-    return {"model": model, "n": n_val, "u": u_val}
+    return {"model": str(model), "n": int(n_val), "u": int(u_val)}
 
 
 def load_generations_df(run_dir: str, verbose: bool = False) -> Optional[pd.DataFrame]:
@@ -278,19 +284,20 @@ def generate_negative_distances(
 
     # 3) Generate from scratch with a local seeded RNG (independent of global state)
     if codebook == "rng":
-        cb = CodebookRNG(
-            n=n,
-            u=u,
-            secret_key=secret_key,
-        )
+        generator_cls = RNGCodewordGenerator
+        generator_kwargs = {}
     else:
-        cb = CodebookBCH(
-            n=n,
-            u=u,
-            secret_key=secret_key,
-            t=bch_t,
-            m=bch_m,
-        )
+        generator_cls = BCHCodewordGenerator
+        generator_kwargs = {"t": bch_t, "m": bch_m}
+
+    base = CodebookBase(
+        n=n,
+        u=u,
+        secret_key=secret_key,
+        generator_cls=generator_cls,
+        generator_kwargs=generator_kwargs,
+    )
+    cb = CodebookHamming(base)
 
     distances_list: List[int] = []
     itr = range(z)

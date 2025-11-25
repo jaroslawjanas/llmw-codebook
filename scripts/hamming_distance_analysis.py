@@ -28,7 +28,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy import stats
 from scipy.optimize import curve_fit
-from src.codebook import CodebookRNG, CodebookBCH
+from src.codebooks import CodebookBase, CodebookHamming, RNGCodewordGenerator, BCHCodewordGenerator
 import src.paths as paths
 from tqdm import tqdm
 
@@ -214,21 +214,21 @@ def main():
 
     # Create codebook
     if args.codebook == "rng":
-        codebook = CodebookRNG(
-            n=args.n,
-            u=args.u,
-            secret_key=args.secret_key,
-            npz_dir=paths.CODEBOOKS_CACHE_DIR
-        )
+        generator_cls = RNGCodewordGenerator
+        generator_kwargs = {}
     else:
-        codebook = CodebookBCH(
-            n=args.n,
-            u=args.u,
-            secret_key=args.secret_key,
-            t=args.bch_t,
-            m=args.bch_m,
-            npz_dir=paths.CODEBOOKS_CACHE_DIR
-        )
+        generator_cls = BCHCodewordGenerator
+        generator_kwargs = {"t": args.bch_t, "m": args.bch_m}
+
+    base = CodebookBase(
+        n=args.n,
+        u=args.u,
+        secret_key=args.secret_key,
+        generator_cls=generator_cls,
+        generator_kwargs=generator_kwargs,
+        cache_dir=paths.CODEBOOKS_CACHE_DIR
+    )
+    codebook = CodebookHamming(base)
 
     # Generate random sequences and find closest matches
     hamming_distances = []
