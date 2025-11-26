@@ -1,0 +1,6 @@
+{
+  "reportPrivateImportUsage": "none",
+  "reportMissingTypeStubs": "none",
+  "include": ["src", "scripts", "main.py"],
+  "exclude": ["cache", "output", "**/__pycache__"]
+}
