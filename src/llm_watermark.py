@@ -561,13 +561,12 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         super().__init__(model_name, secret_key, n, u, green_list_fraction, seed, cache_dir, device, verbose)
 
         
-    def decode_text(self, generated_text: str = None, generated_ids: List[int] = None) -> Tuple[List[List[int]], int]:
+    def decode(self, generated: Union[str, List[int]]) -> Tuple[List[List[int]], int]:
         """
         Decode watermark information from generated text or pre-tokenized IDs.
         
         Args:
-            generated_text: The generated text to decode (prompt already removed)
-            generated_ids: Pre-tokenized IDs to decode directly (bypasses tokenization)
+            generated: Union[str, List[int]] - Either the generated text (prompt removed) or a list of token IDs
             
         Returns:
             List of blocks, each containing:
@@ -575,16 +574,16 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             - 'y_bits': Binary sequence representing y-value [0,1,0,1,...]
             - 'y': y-value as GF element converted to integer
         """
-        # Use pre-tokenized IDs if provided, otherwise tokenize the text
-        if generated_ids is not None:
-            token_ids = generated_ids
+        # Determine input type: list of ids or string text
+        if isinstance(generated, list):
+            token_ids = generated
             decoded_tokens_length = len(token_ids)
-        elif generated_text is not None:
+        elif isinstance(generated, str):
             # Tokenize the generated-only text directly without any formatting
-            token_ids = self.tokenizer.encode(generated_text, add_special_tokens=False)
+            token_ids = self.tokenizer.encode(generated, add_special_tokens=False)
             decoded_tokens_length = len(token_ids)
         else:
-            raise ValueError("Either generated_text or generated_ids must be provided")
+            raise TypeError(f"generated must be str or List[int], got {type(generated).__name__}")
 
         # Calculate number of complete blocks
         num_complete_blocks = len(token_ids) // self.u

@@ -240,9 +240,9 @@ def main():
         if args.force_tokenization:
             if args.verbose:
                 print("Decoding using retokenization path (--force-tokenization).")
-            code_blocks, decoded_tokens_length = decoder.decode_text(generated_text=generated_text)
+            code_blocks, decoded_tokens_length = decoder.decode(generated_text)
         else:
-            code_blocks, decoded_tokens_length = decoder.decode_text(generated_ids=generated_ids)
+            code_blocks, decoded_tokens_length = decoder.decode(generated_ids)
         decoding_time = time.time() - decoding_start
         
         codebook_search_time = 0
