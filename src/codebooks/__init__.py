@@ -9,11 +9,13 @@ Exports:
 
 from .base import CodebookBase
 from .hamming import CodebookHamming
+from .levenshtein import CodebookLevenshtein
 from .generation import CodewordGenerator, RNGCodewordGenerator, BCHCodewordGenerator
 
 __all__ = [
     "CodebookBase",
     "CodebookHamming",
+    "CodebookLevenshtein",
     "CodewordGenerator",
     "RNGCodewordGenerator",
     "BCHCodewordGenerator",

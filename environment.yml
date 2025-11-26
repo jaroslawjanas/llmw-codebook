@@ -17,6 +17,7 @@ dependencies:
   - scipy>=1.1
   - matplotlib>=3.10
   - seaborn>=0.13
+  - rapidfuzz=3.14.3
   - pip
   - pip:
     - accelerate==1.7.0

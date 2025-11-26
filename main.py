@@ -10,7 +10,7 @@ from datetime import datetime
 import src.paths as paths
 from src.utils import get_shuffled_essays
 from src.llm_watermark import LLMWatermarkEncoder, LLMWatermarkDecoder
-from src.codebooks import CodebookBase, CodebookHamming, RNGCodewordGenerator, BCHCodewordGenerator
+from src.codebooks import CodebookBase, CodebookHamming, CodebookLevenshtein, RNGCodewordGenerator, BCHCodewordGenerator
 from tqdm import tqdm
 
 
@@ -25,6 +25,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--secret-key", type=str, default="25111915", help="Secret key used for watermarking and codebook generation (string)")
     parser.add_argument("--codeword-generation", type=str, choices=["rng", "bch"], default="rng", help="Codeword generation strategy for base codebook: 'rng' (random baseline) or 'bch' (BCH-based)")
+    parser.add_argument("--distance", type=str, choices=["hamming", "levenshtein"], default="hamming", help="Distance metric for codebook search")
     parser.add_argument("--bch-t", type=int, default=None, help="BCH designed error-correction parameter t (if None, auto-choose the largest t with k >= n)")
     parser.add_argument("--bch-m", type=int, default=None, help="BCH field degree m (n0=2^m-1). If None, minimal m with n0 >= u is chosen")
     parser.add_argument("--prompt", type=str, help="Custom prompt (uses random essay from dataset if not provided)")
@@ -132,7 +133,7 @@ def main():
         print(f"Warning: Failed to initialize generations.txt: {e}")
     
     # Initialize per-generation outputs DataFrame (only full-length generations will be recorded)
-    generations_columns = ["bit_code", "watermark", "encoded_bit_code", "retrieved_watermark", "successful_watermark", "bit_code_hamming_distance"]
+    generations_columns = ["bit_code", "watermark", "encoded_bit_code", "retrieved_watermark", "successful_watermark", "bit_code_distance"]
     generations_df = pd.DataFrame(columns=generations_columns)
 
     #----------------------------------------#
@@ -171,10 +172,13 @@ def main():
         workers=args.workers,
         chunk_rows=args.chunk_rows
     )
-    codebook = CodebookHamming(base_codebook)
+    if args.distance == "hamming":
+        codebook = CodebookHamming(base_codebook)
+    else:
+        codebook = CodebookLevenshtein(base_codebook)
 
     successful_watermark_recoveries = 0
-    successful_hamming_distances = []  # For top-1 matches
+    successful_distances = []  # For top-1 matches (Hamming or Levenshtein)
     full_generation_prompts = 0        # Count prompts with full max-tokens generation
     properly_encoded_tokens = 0  # Across full-length generations only
     total_tokens_generated = 0   # Across full-length generations only
@@ -257,7 +261,7 @@ def main():
         full_generation_prompts += 1
 
         # Accumulate properly encoded token stats for full-length generations
-        properly_encoded_tokens+= generation_statistics.get("properly_encoded_tokens", 0)
+        properly_encoded_tokens += generation_statistics.get("properly_encoded_tokens", 0)
         total_tokens_generated += generation_statistics.get("total_tokens_generated", 0)
 
         # Append to generations.txt for full-length generations
@@ -278,7 +282,7 @@ def main():
         best_distance = None
         
         for block_idx, code_block in enumerate(code_blocks):
-            # Exact top-1 match using Faiss
+            # Exact top-1 match using codebook search
             codebook_search_start = time.time()
             closest_bits, closest_identity, dist = codebook.find_closest_match(code_block)
             codebook_search_time += time.time() - codebook_search_start
@@ -293,7 +297,7 @@ def main():
         if best_identity is not None and best_identity == watermark_identity:
             successful_watermark_recoveries += 1
             if best_distance is not None:
-                successful_hamming_distances.append(best_distance)
+                successful_distances.append(best_distance)
 
         # Append per-generation row to DataFrame (full-length generations only)
         bit_code_str = ''.join(map(str, bit_code))
@@ -303,7 +307,7 @@ def main():
         else:
             encoded_bit_code_str = ""
         retrieved_watermark_val = int(best_identity) if best_identity is not None else pd.NA
-        bit_code_hamming_distance_val = int(best_distance) if best_distance is not None else pd.NA
+        bit_code_distance_val = int(best_distance) if best_distance is not None else pd.NA
         successful_watermark_flag = bool(best_identity == watermark_identity) if best_identity is not None else False
 
         generations_df.loc[len(generations_df)] = {
@@ -312,7 +316,7 @@ def main():
             "encoded_bit_code": encoded_bit_code_str,
             "retrieved_watermark": retrieved_watermark_val,
             "successful_watermark": successful_watermark_flag,
-            "bit_code_hamming_distance": bit_code_hamming_distance_val,
+            "bit_code_distance": bit_code_distance_val,
         }
 
     # Create results file with parameters and statistics
@@ -360,27 +364,27 @@ def main():
         
         f.write("\n")
         
-        # Write hamming distance statistics
-        if successful_hamming_distances:
-            avg_successful_hamming = np.mean(successful_hamming_distances)
-            min_successful_hamming = np.min(successful_hamming_distances)
-            max_successful_hamming = np.max(successful_hamming_distances)
-            f.write(f"Average hamming distance for successful recoveries (top 1): {avg_successful_hamming:.2f}\n")
-            f.write(f"Min hamming distance for successful recoveries (top 1): {min_successful_hamming}\n")
-            f.write(f"Max hamming distance for successful recoveries (top 1): {max_successful_hamming}\n")
+        # Write distance statistics
+        if successful_distances:
+            avg_successful = np.mean(successful_distances)
+            min_successful = np.min(successful_distances)
+            max_successful = np.max(successful_distances)
+            f.write(f"Average {args.distance} distance for successful recoveries (top 1): {avg_successful:.2f}\n")
+            f.write(f"Min {args.distance} distance for successful recoveries (top 1): {int(min_successful)}\n")
+            f.write(f"Max {args.distance} distance for successful recoveries (top 1): {int(max_successful)}\n")
         else:
-            f.write("No successful recoveries (top 1) to calculate hamming distance statistics\n")
+            f.write(f"No successful recoveries (top 1) to calculate {args.distance} distance statistics\n")
         
 
     print(f"Results saved to: {results_file}")
     print(f"Made {successful_watermark_recoveries} successful watermark recoveries out of {full_generation_prompts}")
     
-    # Calculate and display average hamming distances
-    if successful_hamming_distances:
-        avg_successful_hamming = np.mean(successful_hamming_distances)
-        print(f"Average hamming distance for successful recoveries (top 1): {avg_successful_hamming:.2f}")
+    # Calculate and display average distances
+    if successful_distances:
+        avg_successful = np.mean(successful_distances)
+        print(f"Average {args.distance} distance for successful recoveries (top 1): {avg_successful:.2f}")
     else:
-        print("No successful recoveries (top 1) to calculate average hamming distance")
+        print(f"No successful recoveries (top 1) to calculate average {args.distance} distance")
 
     # Save per-generation outputs (CSV) alongside results.txt
     generations_csv = os.path.join(output_dir, "generations.csv")
