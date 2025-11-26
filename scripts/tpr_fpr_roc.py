@@ -164,7 +164,7 @@ def collect_positives_by_model(
             continue
 
         # Ensure required columns exist
-        if "successful_watermark" not in df.columns or "bit_code_hamming_distance" not in df.columns:
+        if "successful_watermark" not in df.columns or "distance" not in df.columns:
             if verbose:
                 print(f"Skipping {run_dir}: required columns missing")
             continue
@@ -176,11 +176,11 @@ def collect_positives_by_model(
                 lambda x: True if str(x).lower() in ("true", "1", "t", "yes") else False
             )
 
-        df["bit_code_hamming_distance"] = pd.to_numeric(df["bit_code_hamming_distance"], errors="coerce")
+        df["distance"] = pd.to_numeric(df["distance"], errors="coerce")
 
         if model_name not in model_to_frames:
             model_to_frames[model_name] = []
-        model_to_frames[model_name].append(df[["successful_watermark", "bit_code_hamming_distance"]].copy())
+        model_to_frames[model_name].append(df[["successful_watermark", "distance"]].copy())
 
     # Concatenate per model
     out: Dict[str, pd.DataFrame] = {}
@@ -338,7 +338,7 @@ def compute_curves(
     TPR definition:
       - Let Total = total rows in positives_df (all are positives by design)
       - Unsuccessful rows (successful_watermark == False) are always FN regardless of threshold
-      - TP(t) = count(successful_watermark == True AND bit_code_hamming_distance <= t)
+      - TP(t) = count(successful_watermark == True AND distance <= t)
       - TPR(t) = TP(t) / Total
 
     FPR definition:
@@ -374,7 +374,7 @@ def compute_curves(
     else:
         mask_success = positives_df["successful_watermark"] == True
         succ_distances = (
-            positives_df.loc[mask_success, "bit_code_hamming_distance"]
+            positives_df.loc[mask_success, "distance"]
             .dropna()
             .astype(int)
             .to_numpy()
