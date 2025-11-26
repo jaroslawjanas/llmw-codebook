@@ -133,7 +133,7 @@ def main():
         print(f"Warning: Failed to initialize generations.txt: {e}")
     
     # Initialize per-generation outputs DataFrame (only full-length generations will be recorded)
-    generations_columns = ["bit_code", "watermark", "encoded_bit_code", "retrieved_watermark", "successful_watermark", "bit_code_distance"]
+    generations_columns = ["codeword", "watermark", "decoded_codeword", "retrieved_watermark", "successful_watermark", "distance"]
     generations_df = pd.DataFrame(columns=generations_columns)
 
     #----------------------------------------#
@@ -178,16 +178,18 @@ def main():
         codebook = CodebookLevenshtein(base_codebook)
 
     successful_watermark_recoveries = 0
-    successful_distances = []  # For top-1 matches (Hamming or Levenshtein)
-    full_generation_prompts = 0        # Count prompts with full max-tokens generation
-    properly_encoded_tokens = 0  # Across full-length generations only
-    total_tokens_generated = 0   # Across full-length generations only
+    successful_search_distances     = []    # For matches (Hamming or Levenshtein)
+    full_generation_prompts         = 0     # Count prompts with full max-tokens generation
+    properly_encoded_tokens         = 0     # Across full-length generations only
+    total_tokens_generated          = 0     # Across full-length generations only
+    codebook_search_times           = []
 
-    for prompt_idx, prompt in enumerate(prompts, 0):
+    prompt_iter = tqdm(prompts, total=total_prompts, desc="Prompts", unit="prompt", disable=args.verbose)
+    for prompt_idx, prompt in enumerate(prompt_iter, 0):
 
-        bit_code, watermark_identity = codebook.get_random_row(args.seed + prompt_idx)
+        codeword, watermark_identity = codebook.get_random_row(args.seed + prompt_idx)
 
-        if total_prompts > 1:
+        if args.verbose:
             print(f"\n{'='*60}")
             print(f"Processing Prompt {prompt_idx+1}/{total_prompts}")
             if args.verbose:
@@ -204,7 +206,7 @@ def main():
         encoding_start = time.time()
         full_text, generated_text, generated_ids, formatted_prompt, generation_statistics, watermark_blocks_info = watermarker.generate_text(
             prompt=prompt,
-            bit_code=bit_code,
+            bit_code=codeword,
             max_new_tokens=effective_max_tokens,
             verbose=args.verbose
         )
@@ -225,9 +227,20 @@ def main():
             
             # Decoding
             print(f"\n{'-'*60}")
+        
+        # Skip watermark recovery if generated text is shorter than max-tokens
+        if len(generated_ids) < effective_max_tokens:
+            if args.verbose:
+                print(f"Skipping watermark recovery: generated {len(generated_ids)} tokens < {effective_max_tokens} max tokens")
+            continue
+        else:
+            # Count prompts with full generation
+            full_generation_prompts += 1
+
+        if args.verbose:
             print("Decoding")
             print(f"{'-'*60}")
-        
+
         # Create decoder with same parameters
         decoder = LLMWatermarkDecoder(
             model_name=args.model,
@@ -249,17 +262,10 @@ def main():
             code_blocks, decoded_tokens_length = decoder.decode(generated_ids)
         decoding_time = time.time() - decoding_start
         
-        codebook_search_time = 0
-
-        # Skip watermark recovery if generated text is shorter than max-tokens
-        if len(generated_ids) < effective_max_tokens:
-            if args.verbose:
-                print(f"Skipping watermark recovery: generated {len(generated_ids)} tokens < {effective_max_tokens} max tokens")
-            continue
+        # The encode and decoder operates on blocks for legacy reasons.
+        # In our setup we only have the single block, the codeword.
+        decoded_codeword = code_blocks[0]
         
-        # Count prompts with full generation
-        full_generation_prompts += 1
-
         # Accumulate properly encoded token stats for full-length generations
         properly_encoded_tokens += generation_statistics.get("properly_encoded_tokens", 0)
         total_tokens_generated += generation_statistics.get("total_tokens_generated", 0)
@@ -268,55 +274,38 @@ def main():
         try:
             with open(generations_txt_file, 'a', encoding='utf-8') as gf:
                 gf.write("==========\n")
-                gf.write(f"Prompt {prompt_idx+1}:\n")
+                gf.write(f"-- Prompt {prompt_idx+1}: --\n")
                 gf.write(f"{prompt}\n\n")
-                gf.write("Generated:\n")
+                gf.write("-- Generated: --\n")
                 gf.write(f"{generated_text}\n")
                 gf.write("==========\n")
         except Exception as e:
             print(f"Warning: Failed to write generations.txt: {e}")
         
-        # Track best top-1 match across all decoded blocks for this prompt
-        best_block_idx = None
-        best_identity = None
-        best_distance = None
-        
-        for block_idx, code_block in enumerate(code_blocks):
-            # Exact top-1 match using codebook search
-            codebook_search_start = time.time()
-            closest_bits, closest_identity, dist = codebook.find_closest_match(code_block)
-            codebook_search_time += time.time() - codebook_search_start
 
-            # Track best candidate across blocks for CSV
-            if (best_distance is None) or (dist < best_distance):
-                best_distance = int(dist)
-                best_identity = int(closest_identity)
-                best_block_idx = block_idx
+        # Find closest match using codebook search
+        codebook_search_start = time.time()
+        best_codeword_match, retrieved_watermark, search_distance = codebook.find_closest_match(decoded_codeword)
+        codebook_search_times.append(time.time() - codebook_search_start)
 
+        # Conver to string for easier output
+        codeword_str = ''.join(map(str, codeword))
+        decoded_codeword_str = ''.join(map(str, decoded_codeword))
 
-        if best_identity is not None and best_identity == watermark_identity:
+        # Check if watermarking was successful 
+        successful_watermark_flag = bool(retrieved_watermark == watermark_identity)
+        if successful_watermark_flag:
             successful_watermark_recoveries += 1
-            if best_distance is not None:
-                successful_distances.append(best_distance)
+            successful_search_distances.append(search_distance)
 
-        # Append per-generation row to DataFrame (full-length generations only)
-        bit_code_str = ''.join(map(str, bit_code))
-        if best_block_idx is not None and best_block_idx < len(watermark_blocks_info):
-            encoded_bits_block = watermark_blocks_info[best_block_idx].get("encoded_bits", [])
-            encoded_bit_code_str = ''.join(map(str, encoded_bits_block)) if encoded_bits_block else ""
-        else:
-            encoded_bit_code_str = ""
-        retrieved_watermark_val = int(best_identity) if best_identity is not None else pd.NA
-        bit_code_distance_val = int(best_distance) if best_distance is not None else pd.NA
-        successful_watermark_flag = bool(best_identity == watermark_identity) if best_identity is not None else False
 
         generations_df.loc[len(generations_df)] = {
-            "bit_code": bit_code_str,
+            "codeword": codeword_str,
             "watermark": int(watermark_identity),
-            "encoded_bit_code": encoded_bit_code_str,
-            "retrieved_watermark": retrieved_watermark_val,
+            "decoded_codeword": decoded_codeword_str,
+            "retrieved_watermark": retrieved_watermark,
             "successful_watermark": successful_watermark_flag,
-            "bit_code_distance": bit_code_distance_val,
+            "distance": search_distance,
         }
 
     # Create results file with parameters and statistics
@@ -349,11 +338,11 @@ def main():
         f.write("=" * 60 + "\n")
         f.write(f"Total prompts processed: {total_prompts}\n")
         f.write(f"Prompts with full generation: {full_generation_prompts}\n")
-        f.write(f"Successful watermark recoveries (top 1): {successful_watermark_recoveries} out of {full_generation_prompts}\n")
+        f.write(f"Successful watermark recoveries: {successful_watermark_recoveries} out of {full_generation_prompts}\n")
         
         if full_generation_prompts > 0:
             success_rate = successful_watermark_recoveries / full_generation_prompts * 100
-            f.write(f"Success rate (top 1): {success_rate:.2f}%\n")
+            f.write(f"Success rate: {success_rate:.2f}%\n")
         
         # Properly encoded tokens summary across full-length generations
         if total_tokens_generated > 0:
@@ -365,26 +354,31 @@ def main():
         f.write("\n")
         
         # Write distance statistics
-        if successful_distances:
-            avg_successful = np.mean(successful_distances)
-            min_successful = np.min(successful_distances)
-            max_successful = np.max(successful_distances)
-            f.write(f"Average {args.distance} distance for successful recoveries (top 1): {avg_successful:.2f}\n")
-            f.write(f"Min {args.distance} distance for successful recoveries (top 1): {int(min_successful)}\n")
-            f.write(f"Max {args.distance} distance for successful recoveries (top 1): {int(max_successful)}\n")
+        if successful_search_distances:
+            avg_successful = np.mean(successful_search_distances)
+            min_successful = np.min(successful_search_distances)
+            max_successful = np.max(successful_search_distances)
+            f.write(f"Average {args.distance} distance for successful recoveries: {avg_successful:.2f}\n")
+            f.write(f"Min {args.distance} distance for successful recoveries: {int(min_successful)}\n")
+            f.write(f"Max {args.distance} distance for successful recoveries: {int(max_successful)}\n")
         else:
-            f.write(f"No successful recoveries (top 1) to calculate {args.distance} distance statistics\n")
+            f.write(f"No successful recoveries to calculate {args.distance} distance statistics\n")
+
+        # Search time statistics
+        avg_codebook_search_time = 1000 * float(np.mean(codebook_search_times)) if codebook_search_times else 0.0
+        f.write(f"Avg search ({args.distance}): {avg_codebook_search_time:.2f} ms\n")
+
         
 
     print(f"Results saved to: {results_file}")
     print(f"Made {successful_watermark_recoveries} successful watermark recoveries out of {full_generation_prompts}")
     
     # Calculate and display average distances
-    if successful_distances:
-        avg_successful = np.mean(successful_distances)
-        print(f"Average {args.distance} distance for successful recoveries (top 1): {avg_successful:.2f}")
+    if successful_search_distances:
+        avg_successful = np.mean(successful_search_distances)
+        print(f"Average {args.distance} distance for successful recoveries: {avg_successful:.2f}")
     else:
-        print(f"No successful recoveries (top 1) to calculate average {args.distance} distance")
+        print(f"No successful recoveries to calculate average {args.distance} distance")
 
     # Save per-generation outputs (CSV) alongside results.txt
     generations_csv = os.path.join(output_dir, "generations.csv")

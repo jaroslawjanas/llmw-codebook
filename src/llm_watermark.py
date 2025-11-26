@@ -367,7 +367,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
             raise ValueError(f"max_new_tokens ({max_new_tokens}) must be at least 'u' ({self.u}) to generate at least one bit-code block.")
         
         # Setup progress tracking
-        progress_bar = tqdm(range(max_new_tokens))
+        progress_bar = tqdm(range(max_new_tokens), disable=not self.verbose)
         tokens_generated = 0
         green_tokens_selected = 0
         red_tokens_selected = 0
@@ -594,7 +594,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         blocks = []
         
         # Setup progress tracking for decoder
-        progress_bar = tqdm(range(num_complete_blocks), desc="Decoding Blocks")
+        progress_bar = tqdm(range(num_complete_blocks), desc="Decoding Blocks", disable=not self.verbose)
         
         # Process each complete block
         for block_idx in range(num_complete_blocks):
