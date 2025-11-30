@@ -325,8 +325,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         self, 
         prompt: str,
         bit_code: List[int],
-        max_new_tokens: int, 
-        verbose: bool = True
+        max_new_tokens: int
     ) -> Tuple[str, str, List[int], str, Dict[str, int], List[Dict[str, Any]]]:
         """
         Generate text with Lagrange interpolation watermarking.

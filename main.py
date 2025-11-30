@@ -7,11 +7,58 @@ import json
 import os
 import time
 from datetime import datetime
+from threading import Thread
+from queue import Queue
 import src.paths as paths
 from src.utils import get_shuffled_essays
 from src.llm_watermark import LLMWatermarkEncoder, LLMWatermarkDecoder
 from src.codebooks import CodebookBase, CodebookHamming, CodebookLevenshtein, RNGCodewordGenerator, BCHCodewordGenerator
 from tqdm import tqdm
+
+
+def gpu_generation_worker(watermarker, batch_items, results_queue, effective_max_tokens):
+    """
+    Producer: generates text for each prompt and puts results in queue.
+    Runs in a background thread to allow GPU work to overlap with CPU search.
+    
+    Args:
+        watermarker: LLMWatermarkEncoder instance
+        batch_items: List of (prompt_idx, prompt, codeword, watermark_identity) tuples
+        results_queue: Queue to put results into
+        effective_max_tokens: Max tokens to generate per prompt
+    """
+    for prompt_idx, prompt, codeword, watermark_identity in batch_items:
+        try:
+            result = watermarker.generate_text(
+                prompt=prompt,
+                bit_code=codeword,
+                max_new_tokens=effective_max_tokens
+            )
+            full_text, generated_text, generated_ids, formatted_prompt, generation_statistics, watermark_blocks_info = result
+            
+            results_queue.put({
+                'prompt_idx': prompt_idx,
+                'prompt': prompt,
+                'codeword': codeword,
+                'watermark_identity': watermark_identity,
+                'full_text': full_text,
+                'generated_text': generated_text,
+                'generated_ids': generated_ids,
+                'generation_statistics': generation_statistics,
+                'success': True,
+            })
+        except Exception as e:
+            results_queue.put({
+                'prompt_idx': prompt_idx,
+                'prompt': prompt,
+                'codeword': codeword,
+                'watermark_identity': watermark_identity,
+                'error': str(e),
+                'success': False,
+            })
+    
+    # Signal completion
+    results_queue.put(None)
 
 
 def main():
@@ -153,7 +200,7 @@ def main():
         context_window=args.context_window,
         temperature=args.temperature,
         hash_window=args.hash_window,
-        verbose=args.verbose
+        verbose=False
     )
 
     if args.codeword_generation == "rng":
@@ -177,6 +224,19 @@ def main():
     else:
         codebook = CodebookLevenshtein(base_codebook)
 
+    # Create decoder once (shared across all prompts)
+    decoder = LLMWatermarkDecoder(
+        model_name=args.model,
+        secret_key=args.secret_key,
+        n=args.n,
+        u=args.u,
+        green_list_fraction=args.green_fraction,
+        seed=args.seed,
+        device=device,
+        verbose=False  # Disable verbose for decoder in consumer loop
+    )
+
+    # Statistics accumulators
     successful_watermark_recoveries = 0
     successful_search_distances     = []    # For matches (Hamming or Levenshtein)
     full_generation_prompts         = 0     # Count prompts with full max-tokens generation
@@ -184,121 +244,122 @@ def main():
     total_tokens_generated          = 0     # Across full-length generations only
     codebook_search_times           = []
 
-    prompt_iter = tqdm(prompts, total=total_prompts, desc="Prompts", unit="prompt", disable=args.verbose)
-    for prompt_idx, prompt in enumerate(prompt_iter, 0):
-
+    #----------------------------------------#
+    #     Prepare Batch Items (Producer)     #
+    #----------------------------------------#
+    
+    # Pre-collect all (prompt_idx, prompt, codeword, watermark_identity) tuples
+    batch_items = []
+    for prompt_idx, prompt in enumerate(prompts):
         codeword, watermark_identity = codebook.get_random_row(args.seed + prompt_idx)
+        batch_items.append((prompt_idx, prompt, codeword, watermark_identity))
+    
+    if args.verbose:
+        print(f"\nPrepared {len(batch_items)} prompts for generation queue")
 
-        if args.verbose:
-            print(f"\n{'='*60}")
-            print(f"Processing Prompt {prompt_idx+1}/{total_prompts}")
-            if args.verbose:
-                print(f"{'='*60}")
-                print(f"Prompt preview: {prompt[:100] + '...' if len(prompt) > 100 else prompt}\n")
+    #----------------------------------------#
+    #   Start GPU Worker Thread (Producer)   #
+    #----------------------------------------#
+    
+    results_queue = Queue()
+    gpu_thread = Thread(
+        target=gpu_generation_worker,
+        args=(watermarker, batch_items, results_queue, effective_max_tokens),
+        daemon=True
+    )
+    gpu_thread.start()
+    
+    if args.verbose:
+        print("GPU generation worker started")
+
+    #----------------------------------------#
+    #    Consumer Loop (Main Thread)         #
+    #----------------------------------------#
+    
+    # Progress bar for processing (search + stats)
+    processing_progress = tqdm(
+        total=total_prompts, 
+        desc="Processing", 
+        unit="prompt", 
+        disable=args.verbose
+    )
+    
+    processed_count = 0
+    
+    while True:
+        # Block until a result is available from the GPU worker
+        item = results_queue.get()
         
-        if args.verbose:
-            # Encoding
-            print(f"\n{'-'*60}")
-            print("Encoding")
-            print(f"{'-'*60}")
-
-        # Time encoding
-        encoding_start = time.time()
-        full_text, generated_text, generated_ids, formatted_prompt, generation_statistics, watermark_blocks_info = watermarker.generate_text(
-            prompt=prompt,
-            bit_code=codeword,
-            max_new_tokens=effective_max_tokens,
-            verbose=args.verbose
-        )
-        encoding_time = time.time() - encoding_start
+        # Sentinel: None signals all generations are complete
+        if item is None:
+            break
         
-        if args.verbose:
-            print(f"{'-'*60}")
-            print(f"\nPrompt:\n{prompt}")
-            print(f"\nGenerated text:\n{generated_text}")
-
-            print(f"\n{'-'*60}")
-
-            print(f"\nGeneration statistics:")
-            print(f"  Total tokens: {generation_statistics['total_tokens_generated']}")
-            print(f"  Green tokens: {generation_statistics['green_tokens']}")
-            print(f"  Red tokens: {generation_statistics['red_tokens']}")
-            print(f"  Greeen ratio: {generation_statistics['green_ratio']}")
-            
-            # Decoding
-            print(f"\n{'-'*60}")
+        # Handle generation errors
+        if not item['success']:
+            print(f"Generation failed for prompt {item['prompt_idx'] + 1}: {item.get('error', 'Unknown error')}")
+            processing_progress.update(1)
+            processed_count += 1
+            continue
+        
+        prompt_idx = item['prompt_idx']
+        prompt = item['prompt']
+        codeword = item['codeword']
+        watermark_identity = item['watermark_identity']
+        generated_ids = item['generated_ids']
+        generated_text = item['generated_text']
+        generation_statistics = item['generation_statistics']
         
         # Skip watermark recovery if generated text is shorter than max-tokens
         if len(generated_ids) < effective_max_tokens:
             if args.verbose:
-                print(f"Skipping watermark recovery: generated {len(generated_ids)} tokens < {effective_max_tokens} max tokens")
+                print(f"Skipping watermark recovery for prompt {prompt_idx + 1}: generated {len(generated_ids)} tokens < {effective_max_tokens} max tokens")
+            processing_progress.update(1)
+            processed_count += 1
             continue
-        else:
-            # Count prompts with full generation
-            full_generation_prompts += 1
-
-        if args.verbose:
-            print("Decoding")
-            print(f"{'-'*60}")
-
-        # Create decoder with same parameters
-        decoder = LLMWatermarkDecoder(
-            model_name=args.model,
-            secret_key=args.secret_key,
-            n=args.n,
-            u=args.u,
-            green_list_fraction=args.green_fraction,
-            seed=args.seed,
-            device=device,
-            verbose=args.verbose
-        )
         
-        decoding_start = time.time()
+        # Count prompts with full generation
+        full_generation_prompts += 1
+        
+        # Decode watermark
         if args.force_tokenization:
-            if args.verbose:
-                print("Decoding using retokenization path (--force-tokenization).")
             code_blocks, decoded_tokens_length = decoder.decode(generated_text)
         else:
             code_blocks, decoded_tokens_length = decoder.decode(generated_ids)
-        decoding_time = time.time() - decoding_start
         
-        # The encode and decoder operates on blocks for legacy reasons.
-        # In our setup we only have the single block, the codeword.
+        # Single block setup (legacy support for multi-block)
         decoded_codeword = code_blocks[0]
         
         # Accumulate properly encoded token stats for full-length generations
         properly_encoded_tokens += generation_statistics.get("properly_encoded_tokens", 0)
         total_tokens_generated += generation_statistics.get("total_tokens_generated", 0)
-
+        
         # Append to generations.txt for full-length generations
         try:
             with open(generations_txt_file, 'a', encoding='utf-8') as gf:
-                gf.write("==========\n")
-                gf.write(f"-- Prompt {prompt_idx+1}: --\n")
+                gf.write(f"-- Prompt {prompt_idx + 1}: --\n")
                 gf.write(f"{prompt}\n\n")
                 gf.write("-- Generated: --\n")
                 gf.write(f"{generated_text}\n")
-                gf.write("==========\n")
+                gf.write("______________\n")
         except Exception as e:
             print(f"Warning: Failed to write generations.txt: {e}")
         
-
-        # Find closest match using codebook search
+        # Find closest match using codebook search (CPU-intensive)
         codebook_search_start = time.time()
         best_codeword_match, retrieved_watermark, search_distance = codebook.find_closest_match(decoded_codeword)
         codebook_search_times.append(time.time() - codebook_search_start)
-
-        # Conver to string for easier output
+        
+        # Convert to string for easier output
         codeword_str = ''.join(map(str, codeword))
         decoded_codeword_str = ''.join(map(str, decoded_codeword))
-
-        # Check if watermarking was successful 
+        
+        # Check if watermarking was successful
         successful_watermark_flag = bool(retrieved_watermark == watermark_identity)
         if successful_watermark_flag:
             successful_watermark_recoveries += 1
             successful_search_distances.append(search_distance)
-
-
+        
+        # Record in DataFrame
         generations_df.loc[len(generations_df)] = {
             "codeword": codeword_str,
             "watermark": int(watermark_identity),
@@ -307,6 +368,18 @@ def main():
             "successful_watermark": successful_watermark_flag,
             "distance": search_distance,
         }
+        
+        processing_progress.update(1)
+        processed_count += 1
+    
+    processing_progress.close()
+    
+    # Wait for GPU thread to finish (should already be done after sentinel)
+    gpu_thread.join()
+
+    #----------------------------------------#
+    #           Results Summary              #
+    #----------------------------------------#
 
     # Create results file with parameters and statistics
     results_file = os.path.join(output_dir, "results.txt")
