@@ -7,8 +7,7 @@ import json
 import os
 import time
 from datetime import datetime
-from threading import Thread
-from queue import Queue
+from multiprocessing import Process, Queue
 import src.paths as paths
 from src.utils import get_shuffled_essays
 from src.llm_watermark import LLMWatermarkEncoder, LLMWatermarkDecoder
@@ -16,17 +15,20 @@ from src.codebooks import CodebookBase, CodebookHamming, CodebookLevenshtein, RN
 from tqdm import tqdm
 
 
-def gpu_generation_worker(watermarker, batch_items, results_queue, effective_max_tokens):
+def gpu_generation_worker(watermarker_config, batch_items, results_queue, effective_max_tokens):
     """
     Producer: generates text for each prompt and puts results in queue.
-    Runs in a background thread to allow GPU work to overlap with CPU search.
+    Runs in a separate process to allow GPU work to overlap with CPU search.
     
     Args:
-        watermarker: LLMWatermarkEncoder instance
+        watermarker_config: Dict with LLMWatermarkEncoder configuration
         batch_items: List of (prompt_idx, prompt, codeword, watermark_identity) tuples
-        results_queue: Queue to put results into
+        results_queue: multiprocessing.Queue to put results into
         effective_max_tokens: Max tokens to generate per prompt
     """
+    # Create watermarker in this process (models can't be pickled across processes)
+    watermarker = LLMWatermarkEncoder(**watermarker_config)
+    
     for prompt_idx, prompt, codeword, watermark_identity in batch_items:
         try:
             result = watermarker.generate_text(
@@ -36,6 +38,9 @@ def gpu_generation_worker(watermarker, batch_items, results_queue, effective_max
             )
             full_text, generated_text, generated_ids, formatted_prompt, generation_statistics, watermark_blocks_info = result
             
+            # Convert tensor to list for pickling across processes
+            generated_ids_list = list(generated_ids) if isinstance(generated_ids, list) else generated_ids.tolist()
+            
             results_queue.put({
                 'prompt_idx': prompt_idx,
                 'prompt': prompt,
@@ -43,7 +48,7 @@ def gpu_generation_worker(watermarker, batch_items, results_queue, effective_max
                 'watermark_identity': watermark_identity,
                 'full_text': full_text,
                 'generated_text': generated_text,
-                'generated_ids': generated_ids,
+                'generated_ids': generated_ids_list,
                 'generation_statistics': generation_statistics,
                 'success': True,
             })
@@ -187,21 +192,21 @@ def main():
     #              Watermarking              #
     #----------------------------------------#
 
-    # Create watermarker instance
-    watermarker = LLMWatermarkEncoder(
-        model_name=args.model,
-        n=args.n,
-        u=args.u,
-        secret_key=args.secret_key,
-        green_list_fraction=args.green_fraction,
-        bias=args.bias,
-        seed=args.seed,
-        device=device,
-        context_window=args.context_window,
-        temperature=args.temperature,
-        hash_window=args.hash_window,
-        verbose=False
-    )
+    # Watermarker config (passed to GPU worker process)
+    watermarker_config = {
+        'model_name': args.model,
+        'n': args.n,
+        'u': args.u,
+        'secret_key': args.secret_key,
+        'green_list_fraction': args.green_fraction,
+        'bias': args.bias,
+        'seed': args.seed,
+        'device': device,
+        'context_window': args.context_window,
+        'temperature': args.temperature,
+        'hash_window': args.hash_window,
+        'verbose': False
+    }
 
     if args.codeword_generation == "rng":
         generator_cls = RNGCodewordGenerator
@@ -243,6 +248,7 @@ def main():
     properly_encoded_tokens         = 0     # Across full-length generations only
     total_tokens_generated          = 0     # Across full-length generations only
     codebook_search_times           = []
+    queue_wait_times                = []    # Time spent waiting for GPU queue
 
     #----------------------------------------#
     #     Prepare Batch Items (Producer)     #
@@ -258,19 +264,19 @@ def main():
         print(f"\nPrepared {len(batch_items)} prompts for generation queue")
 
     #----------------------------------------#
-    #   Start GPU Worker Thread (Producer)   #
+    #   Start GPU Worker Process (Producer)  #
     #----------------------------------------#
     
     results_queue = Queue()
-    gpu_thread = Thread(
+    gpu_process = Process(
         target=gpu_generation_worker,
-        args=(watermarker, batch_items, results_queue, effective_max_tokens),
+        args=(watermarker_config, batch_items, results_queue, effective_max_tokens),
         daemon=True
     )
-    gpu_thread.start()
+    gpu_process.start()
     
     if args.verbose:
-        print("GPU generation worker started")
+        print("GPU generation worker process started")
 
     #----------------------------------------#
     #    Consumer Loop (Main Thread)         #
@@ -288,7 +294,10 @@ def main():
     
     while True:
         # Block until a result is available from the GPU worker
+        wait_start = time.time()
         item = results_queue.get()
+        wait_time = time.time() - wait_start
+        queue_wait_times.append(wait_time)
         
         # Sentinel: None signals all generations are complete
         if item is None:
@@ -312,10 +321,10 @@ def main():
         # Verbose output for this prompt
         if args.verbose:
             print(f"\n{'='*60}")
-            print(f"Processing Prompt {prompt_idx + 1}/{total_prompts}")
+            print(f"\tProcessing Prompt {prompt_idx + 1}/{total_prompts}")
             print(f"{'='*60}")
-            print(f"Prompt prompt:\n{prompt[:100] + '...' if len(prompt) > 100 else prompt}\n")
-            print(f"\nGenerated text:\n{generated_text[:100]+ '...' if len(generated_text) > 100 else generated_text}")
+            print(f"Prompt:\n{prompt[:100] + '...' if len(prompt) > 100 else prompt}\n\n")
+            print(f"Generated text:\n{generated_text[:100]+ '...' if len(generated_text) > 100 else generated_text}")
             print(f"{'_'*14}\n")
 
 
@@ -361,7 +370,8 @@ def main():
         codebook_search_times.append(search_time)
         
         if args.verbose:
-            print(f"Search time: {search_time * 1000:.2f} ms")
+            print(f"\tQueue wait: {wait_time * 1000:.2f} ms")
+            print(f"\tSearch time: {search_time * 1000:.2f} ms\n")
         
         # Convert to string for easier output
         codeword_str = ''.join(map(str, codeword))
@@ -388,8 +398,8 @@ def main():
     
     processing_progress.close()
     
-    # Wait for GPU thread to finish (should already be done after sentinel)
-    gpu_thread.join()
+    # Wait for GPU process to finish (should already be done after sentinel)
+    gpu_process.join()
 
     #----------------------------------------#
     #           Results Summary              #
@@ -467,9 +477,11 @@ def main():
     else:
         print(f"No successful recoveries to calculate average {args.distance} distance")
     
-    # Display average search time
+    # Display average search time and queue wait time
     avg_codebook_search_time = 1000 * float(np.mean(codebook_search_times)) if codebook_search_times else 0.0
+    avg_queue_wait_time = 1000 * float(np.mean(queue_wait_times)) if queue_wait_times else 0.0
     print(f"Average {args.distance} search time: {avg_codebook_search_time:.2f} ms")
+    print(f"Average queue wait time: {avg_queue_wait_time:.2f} ms")
 
     # Save per-generation outputs (CSV) alongside results.txt
     generations_csv = os.path.join(output_dir, "generations.csv")
