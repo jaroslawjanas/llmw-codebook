@@ -94,6 +94,10 @@ def main():
     parser.add_argument("--force-tokenization", action="store_true", help="Force detokenization and retokenization of text for decoding instead of using token IDs directly")
     parser.add_argument("--workers", type=int, default=4, help="Number of worker processes for codebook generation (default: 4)")
     parser.add_argument("--chunk-rows", type=int, default=None, help="Optional override for generation chunk size in rows. If not set, auto policy is used.")
+    # If set, run the entire pipeline in the main process (no separate GPU worker / no IPC).
+    # Useful for debugging and environments where multiprocessing is problematic or when you want deterministic,
+    # step-by-step execution without producer/consumer overlap.
+    parser.add_argument("--synch", action="store_true", help="Run synchronously in a single process (disable GPU worker and queue)")
 
     args = parser.parse_args()
 
@@ -205,7 +209,7 @@ def main():
         'context_window': args.context_window,
         'temperature': args.temperature,
         'hash_window': args.hash_window,
-        'verbose': False
+        'verbose': args.verbose and args.synch
     }
 
     if args.codeword_generation == "rng":
@@ -238,7 +242,7 @@ def main():
         green_list_fraction=args.green_fraction,
         seed=args.seed,
         device=device,
-        verbose=False  # Disable verbose for decoder in consumer loop
+        verbose=args.verbose and args.synch  # Disable verbose for decoder in consumer loop
     )
 
     # Statistics accumulators
@@ -264,19 +268,30 @@ def main():
         print(f"\nPrepared {len(batch_items)} prompts for generation queue")
 
     #----------------------------------------#
-    #   Start GPU Worker Process (Producer)  #
+    #   Start Generation Worker              #
     #----------------------------------------#
     
     results_queue = Queue()
-    gpu_process = Process(
-        target=gpu_generation_worker,
-        args=(watermarker_config, batch_items, results_queue, effective_max_tokens),
-        daemon=True
-    )
-    gpu_process.start()
-    
-    if args.verbose:
-        print("GPU generation worker process started")
+    # Unified interface: both modes push results into the same Queue; the consumer loop below is identical.
+    gpu_process = None
+    if args.synch:
+        if args.verbose:
+            print("Running generation worker synchronously (--synch)")
+        gpu_generation_worker(
+            watermarker_config=watermarker_config,
+            batch_items=batch_items,
+            results_queue=results_queue,
+            effective_max_tokens=effective_max_tokens
+        )
+    else:
+        gpu_process = Process(
+            target=gpu_generation_worker,
+            args=(watermarker_config, batch_items, results_queue, effective_max_tokens),
+            daemon=True
+        )
+        gpu_process.start()
+        if args.verbose:
+            print("GPU generation worker process started")
 
     #----------------------------------------#
     #    Consumer Loop (Main Thread)         #
@@ -317,7 +332,9 @@ def main():
     #   (generation time &lt; search time), which tends to be more likely after the pipeline has warmed up.
     
     while True:
-        # Block until a result is available from the GPU worker
+        # Block until a result is available.
+        # - Async mode: waits for IPC from the GPU worker process.
+        # - --synch mode: waits for items pushed by the inline worker; overlap is disabled so this is typically short.
         wait_start = time.time()
         item = results_queue.get()
         wait_time = time.time() - wait_start
@@ -422,8 +439,10 @@ def main():
     
     processing_progress.close()
     
-    # Wait for GPU process to finish (should already be done after sentinel)
-    gpu_process.join()
+    # Wait for worker process to finish (only applicable in async mode).
+    # Guarded join keeps linters happy and avoids referencing an unbound variable in --synch runs.
+    if gpu_process is not None:
+        gpu_process.join()
 
     #----------------------------------------#
     #           Results Summary              #
