@@ -316,6 +316,8 @@ def main():
             print(f"{'='*60}")
             print(f"Prompt prompt:\n{prompt[:100] + '...' if len(prompt) > 100 else prompt}\n")
             print(f"\nGenerated text:\n{generated_text[:100]+ '...' if len(generated_text) > 100 else generated_text}")
+            print(f"{'_'*14}\n")
+
 
         # Skip watermark recovery if generated text is shorter than max-tokens
         if len(generated_ids) < effective_max_tokens:
@@ -353,9 +355,13 @@ def main():
             print(f"Warning: Failed to write generations.txt: {e}")
         
         # Find closest match using codebook search (CPU-intensive)
-        codebook_search_start = time.time()
+        search_start = time.time()
         best_codeword_match, retrieved_watermark, search_distance = codebook.find_closest_match(decoded_codeword)
-        codebook_search_times.append(time.time() - codebook_search_start)
+        search_time = time.time() - search_start
+        codebook_search_times.append(search_time)
+        
+        if args.verbose:
+            print(f"Search time: {search_time * 1000:.2f} ms")
         
         # Convert to string for easier output
         codeword_str = ''.join(map(str, codeword))
@@ -460,6 +466,10 @@ def main():
         print(f"Average {args.distance} distance for successful recoveries: {avg_successful:.2f}")
     else:
         print(f"No successful recoveries to calculate average {args.distance} distance")
+    
+    # Display average search time
+    avg_codebook_search_time = 1000 * float(np.mean(codebook_search_times)) if codebook_search_times else 0.0
+    print(f"Average {args.distance} search time: {avg_codebook_search_time:.2f} ms")
 
     # Save per-generation outputs (CSV) alongside results.txt
     generations_csv = os.path.join(output_dir, "generations.csv")
