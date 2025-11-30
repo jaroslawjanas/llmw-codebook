@@ -405,6 +405,10 @@ def main():
     #           Results Summary              #
     #----------------------------------------#
 
+    # Calculate timing averages once
+    avg_codebook_search_time = 1000 * float(np.mean(codebook_search_times)) if codebook_search_times else 0.0
+    avg_queue_wait_time = 1000 * float(np.mean(queue_wait_times)) if queue_wait_times else 0.0
+
     # Create results file with parameters and statistics
     results_file = os.path.join(output_dir, "results.txt")
     
@@ -461,11 +465,9 @@ def main():
         else:
             f.write(f"No successful recoveries to calculate {args.distance} distance statistics\n")
 
-        # Search time statistics
-        avg_codebook_search_time = 1000 * float(np.mean(codebook_search_times)) if codebook_search_times else 0.0
-        f.write(f"Avg search ({args.distance}): {avg_codebook_search_time:.2f} ms\n")
-
-        
+        # Timing statistics
+        f.write(f"Average search time ({args.distance}): {avg_codebook_search_time:.2f} ms\n")
+        f.write(f"Average queue wait time: {avg_queue_wait_time:.2f} ms\n")
 
     print(f"\bResults saved to: {results_file}")
     print(f"Made {successful_watermark_recoveries} successful watermark recoveries out of {full_generation_prompts}")
@@ -478,8 +480,6 @@ def main():
         print(f"No successful recoveries to calculate average {args.distance} distance")
     
     # Display average search time and queue wait time
-    avg_codebook_search_time = 1000 * float(np.mean(codebook_search_times)) if codebook_search_times else 0.0
-    avg_queue_wait_time = 1000 * float(np.mean(queue_wait_times)) if queue_wait_times else 0.0
     print(f"Average {args.distance} search time: {avg_codebook_search_time:.2f} ms")
     print(f"Average queue wait time: {avg_queue_wait_time:.2f} ms")
 
