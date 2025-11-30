@@ -128,22 +128,24 @@ class CodebookBase:
             self._load_cache()
             return
 
-        # Generate raw 0/1 bits (N, u)
-        raw_codewords = self.generator.generate(
+        # Generate packed codes (N, ceil(u/8))
+        packed_codewords = self.generator.generate(
             workers=self.workers,
             chunk_rows=self.chunk_rows,
         )
-        # Persist packed representation
-        self._store_generated_codewords(raw_codewords)
+        # Persist packed representation directly
+        self._store_packed_codewords(packed_codewords)
         # Load into memory for use
         self._load_cache()
 
-    def _store_generated_codewords(self, codewords_bits_01: np.ndarray) -> None:
-        if codewords_bits_01.ndim != 2 or codewords_bits_01.shape[1] != self.u:
-            raise ValueError(f"Expected raw bit matrix of shape (2^n, u), got {codewords_bits_01.shape}")
+    def _store_packed_codewords(self, packed_codes: np.ndarray) -> None:
+        if packed_codes.ndim != 2:
+            raise ValueError(f"Expected packed bit matrix of shape (2^n, ceil(u/8)), got {packed_codes.shape}")
+        expected_bytes = (self.u + 7) // 8
+        if packed_codes.shape[1] != expected_bytes:
+            raise ValueError(f"Expected second dimension bytes_per_code={expected_bytes}, got {packed_codes.shape[1]}")
 
-        packed_codes = self._pack_bits_2d(codewords_bits_01, self.u)
-        watermark_identities = np.arange(codewords_bits_01.shape[0], dtype=np.int64)
+        watermark_identities = np.arange(packed_codes.shape[0], dtype=np.int64)
 
         os.makedirs(os.path.dirname(self.npz_path), exist_ok=True)
         np.savez_compressed(

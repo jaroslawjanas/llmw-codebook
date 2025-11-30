@@ -1,7 +1,7 @@
 """
 Deterministic codeword generation strategies.
 
-Provides pluggable generator classes that produce raw bit arrays (shape: N, u)
+Provides pluggable generator classes that produce packed bit arrays (shape: N, ceil(u/8))
 for watermark identities, where N = 2 ** n.
 """
 
@@ -15,6 +15,15 @@ from typing import Any, Optional, Tuple
 
 import numpy as np
 from tqdm import tqdm
+
+def _pack_bits_2d(bits_01: np.ndarray, u: int) -> np.ndarray:
+    if bits_01.ndim != 2 or bits_01.shape[1] != u:
+        raise ValueError("Expected (N, u) bit matrix")
+    remainder = u % 8
+    if remainder != 0:
+        pad = 8 - remainder
+        bits_01 = np.pad(bits_01, pad_width=((0, 0), (0, pad)), mode="constant", constant_values=0)
+    return np.packbits(bits_01, axis=1, bitorder="big")
 
 __all__ = [
     "CodewordGenerator",
@@ -76,10 +85,12 @@ class RNGCodewordGenerator(CodewordGenerator):
 
     def generate(self, *, workers: int, chunk_rows: Optional[int]) -> np.ndarray:
         table_size = 2 ** self.n
+        bytes_per_code = (self.u + 7) // 8
         chunk_rows = chunk_rows or self._default_chunk_rows()
         chunks = [(start, min(table_size, start + chunk_rows)) for start in range(0, table_size, chunk_rows)]
 
-        bits = np.empty((table_size, self.u), dtype=np.uint8)
+        # Pre-allocate PACKED array (N, ceil(u/8))
+        packed_bits = np.empty((table_size, bytes_per_code), dtype=np.uint8)
 
         args_iter = ((start, end, self.u, self.secret_key) for start, end in chunks)
         with Pool(processes=workers) as pool:
@@ -90,9 +101,10 @@ class RNGCodewordGenerator(CodewordGenerator):
                 unit="chunk",
             ):
                 end = start + chunk_bits.shape[0]
-                bits[start:end] = chunk_bits
+                # Pack each chunk immediately to minimize memory
+                packed_bits[start:end] = _pack_bits_2d(chunk_bits, self.u)
 
-        return bits
+        return packed_bits
 
     def _default_chunk_rows(self) -> int:
         target_bytes = 4 * 1024 * 1024
@@ -188,10 +200,12 @@ class BCHCodewordGenerator(CodewordGenerator):
     def generate(self, *, workers: int, chunk_rows: Optional[int]) -> np.ndarray:
         resolved_m, resolved_t, _ = self._resolve_bch_parameters()
         table_size = 2 ** self.n
+        bytes_per_code = (self.u + 7) // 8
         chunk_rows = chunk_rows or self._default_chunk_rows()
         chunks = [(start, min(table_size, start + chunk_rows)) for start in range(0, table_size, chunk_rows)]
 
-        bits = np.empty((table_size, self.u), dtype=np.uint8)
+        # Pre-allocate PACKED array (N, ceil(u/8))
+        packed_bits = np.empty((table_size, bytes_per_code), dtype=np.uint8)
 
         with Pool(
             processes=workers,
@@ -205,9 +219,10 @@ class BCHCodewordGenerator(CodewordGenerator):
                 unit="chunk",
             ):
                 end = start + chunk_bits.shape[0]
-                bits[start:end] = chunk_bits
+                # Pack each chunk immediately to minimize memory
+                packed_bits[start:end] = _pack_bits_2d(chunk_bits, self.u)
 
-        return bits
+        return packed_bits
 
     def _default_chunk_rows(self) -> int:
         target_bytes = 4 * 1024 * 1024
