@@ -309,6 +309,14 @@ def main():
         generated_text = item['generated_text']
         generation_statistics = item['generation_statistics']
         
+        # Verbose output for this prompt
+        if args.verbose:
+            print(f"\n{'='*60}")
+            print(f"Processing Prompt {prompt_idx + 1}/{total_prompts}")
+            print(f"{'='*60}")
+            print(f"Prompt prompt:\n{prompt[:100] + '...' if len(prompt) > 100 else prompt}\n")
+            print(f"\nGenerated text:\n{generated_text[:100]+ '...' if len(generated_text) > 100 else generated_text}")
+
         # Skip watermark recovery if generated text is shorter than max-tokens
         if len(generated_ids) < effective_max_tokens:
             if args.verbose:
@@ -340,7 +348,7 @@ def main():
                 gf.write(f"{prompt}\n\n")
                 gf.write("-- Generated: --\n")
                 gf.write(f"{generated_text}\n")
-                gf.write("______________\n")
+                gf.write(f"{'_'*14}\n")
         except Exception as e:
             print(f"Warning: Failed to write generations.txt: {e}")
         
@@ -443,7 +451,7 @@ def main():
 
         
 
-    print(f"Results saved to: {results_file}")
+    print(f"\bResults saved to: {results_file}")
     print(f"Made {successful_watermark_recoveries} successful watermark recoveries out of {full_generation_prompts}")
     
     # Calculate and display average distances
