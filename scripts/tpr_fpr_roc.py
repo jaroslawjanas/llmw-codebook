@@ -21,7 +21,7 @@ import argparse
 import random
 import zlib
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple, TypedDict
+from typing import Dict, List, Optional, Tuple, TypedDict, cast
 
 # 1) Compute the project root (one level up from scripts/)
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
@@ -35,7 +35,7 @@ from matplotlib.ticker import FuncFormatter
 
 from tqdm import tqdm
 import src.paths as paths
-from src.codebooks import CodebookBase, CodebookHamming, RNGCodewordGenerator, BCHCodewordGenerator
+from src.codebooks import CodebookBase, CodebookHamming, CodebookLevenshtein, RNGCodewordGenerator, BCHCodewordGenerator
 
 
 def ensure_dirs(*dirs: str) -> None:
@@ -180,7 +180,8 @@ def collect_positives_by_model(
 
         if model_name not in model_to_frames:
             model_to_frames[model_name] = []
-        model_to_frames[model_name].append(df[["successful_watermark", "distance"]].copy())
+        sub_df = cast(pd.DataFrame, df[["successful_watermark", "distance"]].copy())
+        model_to_frames[model_name].append(sub_df)
 
     # Concatenate per model
     out: Dict[str, pd.DataFrame] = {}
@@ -199,18 +200,19 @@ def generate_negative_distances(
     seed: int,
     secret_key: str,
     codebook: str,
+    distance: str,
     bch_t: Optional[int],
     bch_m: Optional[int],
     verbose: bool = False,
 ) -> np.ndarray:
     """
-    Generate or load cached negative distances (Hamming distances of random sequences to the closest code).
+    Generate or load cached negative distances (Hamming/Levenshtein distances of random sequences to the closest code).
     Caching strategy:
-      - Exact hit: load cache file for (n,u,z,seed,secret_key,codebook).
-      - Downsample: if a larger cache exists with same (n,u,seed,secret_key,codebook) and z_big >= z,
+      - Exact hit: load cache file for (n,u,z,seed,secret_key,codebook,distance).
+      - Downsample: if a larger cache exists with same (n,u,seed,secret_key,codebook,distance) and z_big >= z,
         deterministically sample z entries without replacement, save the exact cache, and return.
       - Miss: generate with a local seeded RNG, save, and return.
-    The cache key includes the codebook family and BCH params to avoid mixing results across algorithms.
+    The cache key includes the codebook family, BCH params, and the distance metric to avoid mixing results across algorithms.
     """
     # Ensure paths setup for caches
     paths.ensure_directories()
@@ -218,12 +220,14 @@ def generate_negative_distances(
 
     sk_clean = sanitize_filename(secret_key)
     if codebook == "rng":
-        cb_tag = "rng"
+        base_tag = "rng"
     else:
         # Note: we include provided parameters; if auto, include 'auto' in tag to reflect resolution
         t_tag = "auto" if bch_t is None else str(bch_t)
         m_tag = "auto" if bch_m is None else str(bch_m)
-        cb_tag = f"bch_m{m_tag}_t{t_tag}"
+        base_tag = f"bch_m{m_tag}_t{t_tag}"
+    # Include distance metric to avoid cache/file collisions across metrics
+    cb_tag = f"{base_tag}-{distance}"
 
     def build_cache_path(z_val: int) -> str:
         fname = f"negative_distances_z{z_val}_s{seed}_n{n}_u{u}_cb{cb_tag}_sk{sk_clean}.npz"
@@ -297,7 +301,10 @@ def generate_negative_distances(
         generator_cls=generator_cls,
         generator_kwargs=generator_kwargs,
     )
-    cb = CodebookHamming(base)
+    if distance == "hamming":
+        cb = CodebookHamming(base)
+    else:
+        cb = CodebookLevenshtein(base)
 
     distances_list: List[int] = []
     itr = range(z)
@@ -741,6 +748,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--secret-key", type=str, default="25111915", help="Secret key used for codebook generation (string)")
     parser.add_argument("--codebook", type=str, choices=["rng", "bch"], default="rng", help="Codebook type for negatives: 'rng' or 'bch'")
+    parser.add_argument("--distance", type=str, choices=["hamming", "levenshtein"], default="hamming", help="Distance metric for negatives search: 'hamming' or 'levenshtein'")
     parser.add_argument("--bch-t", type=int, default=None, help="BCH designed error-correction parameter t (if None, auto-choose the largest t with k >= n)")
     parser.add_argument("--bch-m", type=int, default=None, help="BCH field degree m (n0=2^m-1). If None, minimal m with n0 >= u is chosen")
     parser.add_argument("--fpr-target", type=float, default=0.01, help="Target FPR for reporting TPR (default=0.01)")
@@ -767,7 +775,16 @@ def main():
 
     # Create timestamped run subfolder under save-dir
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir_name = f"tpr_fpr_roc_n{args.n}_u{args.u}_z{args.z}_cb-{args.codebook}_{timestamp}"
+    # Build codebook tag for filenames/plots (codeword generator + distance metric)
+    if args.codebook == "rng":
+        _base_tag = "rng"
+    else:
+        _t_tag = "auto" if args.bch_t is None else str(args.bch_t)
+        _m_tag = "auto" if args.bch_m is None else str(args.bch_m)
+        _base_tag = f"bch_m{_m_tag}_t{_t_tag}"
+    cb_tag = f"{_base_tag}-{args.distance}"
+
+    run_dir_name = f"tpr_fpr_roc_n{args.n}_u{args.u}_z{args.z}_cb-{cb_tag}_{timestamp}"
     run_save_dir = os.path.join(args.save_dir, run_dir_name)
     ensure_dirs(run_save_dir)
     if args.verbose:
@@ -779,7 +796,7 @@ def main():
 
     if args.verbose:
         print(f"Secret key: {args.secret_key}")
-        print(f"Generating negatives: z={args.z}, u={args.u}, codebook={args.codebook}")
+        print(f"Generating negatives: z={args.z}, u={args.u}, codebook={args.codebook}, distance={args.distance}")
         print(f"Collecting positives from: {args.output_root} (n={args.n}, u={args.u})")
 
     # Resolve threshold range
@@ -794,7 +811,7 @@ def main():
     # 1) FPR: negative set distances
     neg_distances = generate_negative_distances(
         n=args.n, u=args.u, z=args.z, seed=args.seed, secret_key=args.secret_key,
-        codebook=args.codebook, bch_t=args.bch_t, bch_m=args.bch_m, verbose=args.verbose
+        codebook=args.codebook, distance=args.distance, bch_t=args.bch_t, bch_m=args.bch_m, verbose=args.verbose
     )
     if args.verbose:
         print(f"Collected {len(neg_distances)} negative distances")
@@ -820,10 +837,10 @@ def main():
         model_to_curves[model] = (thresholds, fpr, tpr, tpr_at_target)
 
         # Save per-model ROC CSV and plot
-        csv_path = save_roc_csv(run_save_dir, model, thresholds, fpr, tpr, args.n, args.u, args.z, args.codebook)
+        csv_path = save_roc_csv(run_save_dir, model, thresholds, fpr, tpr, args.n, args.u, args.z, cb_tag)
         png_path = plot_per_model(
             model, thresholds, fpr, tpr, tpr_at_target, args.fpr_target,
-            run_save_dir, args.n, args.u, args.z, args.codebook,
+            run_save_dir, args.n, args.u, args.z, cb_tag,
             scale=args.scale, x_eps=args.x_eps, fpr_min=args.fpr_min, fpr_max=args.fpr_max
         )
 
@@ -831,7 +848,7 @@ def main():
 
     # 5) Combined plot
     combined_path = plot_combined(
-        model_to_curves, args.fpr_target, run_save_dir, args.n, args.u, args.z, args.codebook,
+        model_to_curves, args.fpr_target, run_save_dir, args.n, args.u, args.z, cb_tag,
         scale=args.scale, x_eps=args.x_eps, fpr_min=args.fpr_min, fpr_max=args.fpr_max
     )
     print(f"Combined ROC saved to: {combined_path}")
@@ -852,7 +869,7 @@ def main():
             vals = [interpolate_tpr_at_fpr(fpr_arr, tpr_arr, t)[0] for t in ticks]
             tpr_rows.append(vals)
 
-        table_path = save_table_image(run_save_dir, args.n, args.u, args.z, model_names, tick_labels, hd_values, tpr_rows, args.codebook)
+        table_path = save_table_image(run_save_dir, args.n, args.u, args.z, model_names, tick_labels, hd_values, tpr_rows, cb_tag)
         print(f"ROC table saved to: {table_path}")
     except Exception as e:
         print(f"Warning: failed to generate table image: {e}")
