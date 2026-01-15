@@ -20,9 +20,8 @@ hf_token
 # Exclude unison profile files
 *.prf
 
-# https://docs.cline.bot/prompting/cline-memory-bank
-# AI Memory bank
-memory-bank/
+# AI
+.claude/
 .clinerules/
 
 # Experiment utomation files
