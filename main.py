@@ -1,9 +1,15 @@
+"""
+BCH-based LLM text watermarking.
+
+Uses BCH error-correcting codes to embed and recover watermarks from LLM-generated text.
+Unlike codebook-based approaches, BCH directly recovers the watermark via syndrome decoding.
+"""
+
 import argparse
 import random
 import numpy as np
 import torch
 import pandas as pd
-import json
 import os
 import time
 from datetime import datetime
@@ -11,25 +17,26 @@ from multiprocessing import Process, Queue
 import src.paths as paths
 from src.utils import get_shuffled_essays
 from src.llm_watermark import LLMWatermarkEncoder, LLMWatermarkDecoder
-from src.codebooks import CodebookBase, CodebookHamming, CodebookLevenshtein, RNGCodewordGenerator, BCHCodewordGenerator
+from src.bch_codec import BCHCodec
+from src.bch_params import format_bch_summary
 from tqdm import tqdm
 
 
 def gpu_generation_worker(watermarker_config, batch_items, results_queue, effective_max_tokens):
     """
     Producer: generates text for each prompt and puts results in queue.
-    Runs in a separate process to allow GPU work to overlap with CPU search.
-    
+    Runs in a separate process to allow GPU work to overlap with CPU decode.
+
     Args:
         watermarker_config: Dict with LLMWatermarkEncoder configuration
-        batch_items: List of (prompt_idx, prompt, codeword, watermark_identity) tuples
+        batch_items: List of (prompt_idx, prompt, codeword, watermark_int) tuples
         results_queue: multiprocessing.Queue to put results into
         effective_max_tokens: Max tokens to generate per prompt
     """
     # Create watermarker in this process (models can't be pickled across processes)
     watermarker = LLMWatermarkEncoder(**watermarker_config)
-    
-    for prompt_idx, prompt, codeword, watermark_identity in batch_items:
+
+    for prompt_idx, prompt, codeword, watermark_int in batch_items:
         try:
             result = watermarker.generate_text(
                 prompt=prompt,
@@ -37,15 +44,15 @@ def gpu_generation_worker(watermarker_config, batch_items, results_queue, effect
                 max_new_tokens=effective_max_tokens
             )
             full_text, generated_text, generated_ids, formatted_prompt, generation_statistics, watermark_blocks_info = result
-            
+
             # Convert tensor to list for pickling across processes
             generated_ids_list = list(generated_ids) if isinstance(generated_ids, list) else generated_ids.tolist()
-            
+
             results_queue.put({
                 'prompt_idx': prompt_idx,
                 'prompt': prompt,
                 'codeword': codeword,
-                'watermark_identity': watermark_identity,
+                'watermark_int': watermark_int,
                 'full_text': full_text,
                 'generated_text': generated_text,
                 'generated_ids': generated_ids_list,
@@ -57,43 +64,39 @@ def gpu_generation_worker(watermarker_config, batch_items, results_queue, effect
                 'prompt_idx': prompt_idx,
                 'prompt': prompt,
                 'codeword': codeword,
-                'watermark_identity': watermark_identity,
+                'watermark_int': watermark_int,
                 'error': str(e),
                 'success': False,
             })
-    
+
     # Signal completion
     results_queue.put(None)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="LLM Text Watermarking based on Lagrange Interpolation")
+    parser = argparse.ArgumentParser(description="BCH-based LLM Text Watermarking")
     parser.add_argument("--model", type=str, default="facebook/opt-125m", help="Model to use")
     parser.add_argument("--max-tokens", type=int, default=None, help="Maximum tokens to generate (default: match --u)")
     parser.add_argument("--green-fraction", type=float, default=0.5, help="Fraction of tokens in green list")
     parser.add_argument("--bias", type=float, default=6.0, help="Bias to add to green/red tokens")
-    parser.add_argument("--n", type=int, default=16, help="Size of the code table")
-    parser.add_argument("--u", type=int, default=100, help="Size of the codes")
+    parser.add_argument("--n", type=int, default=16, help="Watermark message length in bits (supports 2^n unique watermarks)")
+    parser.add_argument("--u", type=int, default=100, help="Codeword length in bits (tokens per watermark)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument("--secret-key", type=str, default="25111915", help="Secret key used for watermarking and codebook generation (string)")
-    parser.add_argument("--codeword-generation", type=str, choices=["rng", "bch"], default="rng", help="Codeword generation strategy for base codebook: 'rng' (random baseline) or 'bch' (BCH-based)")
-    parser.add_argument("--distance", type=str, choices=["hamming", "levenshtein"], default="hamming", help="Distance metric for codebook search")
-    parser.add_argument("--bch-t", type=int, default=None, help="BCH designed error-correction parameter t (if None, auto-choose the largest t with k >= n)")
-    parser.add_argument("--bch-m", type=int, default=None, help="BCH field degree m (n0=2^m-1). If None, minimal m with n0 >= u is chosen")
+    parser.add_argument("--secret-key", type=str, default="25111915", help="Secret key used for watermarking (string)")
+    parser.add_argument("--bch-t", type=int, default=None, help="BCH error-correction capability t (if None, auto-select maximum)")
+    parser.add_argument("--bch-m", type=int, default=None, help="BCH field degree m (n0=2^m-1). If None, auto-select optimal")
     parser.add_argument("--prompt", type=str, help="Custom prompt (uses random essay from dataset if not provided)")
-    parser.add_argument("--dataset", type=str, nargs=4, default=["ChristophSchuhmann/essays-with-instructions", "default", "train", "instructions"], 
+    parser.add_argument("--dataset", type=str, nargs=4, default=["ChristophSchuhmann/essays-with-instructions", "default", "train", "instructions"],
                         help="Hugging Face dataset to use for prompts. Format: '<org>/<dataset name>' '<subset>' '<split>' '<column>'. Default: 'ChristophSchuhmann/essays-with-instructions' 'default' 'train' 'instructions'")
     parser.add_argument("--cache-dir", type=str, default=paths.CACHE_DIR, help="Cache directory for models and datasets")
     parser.add_argument("--no-cuda", action="store_true", help="Disable CUDA even if available")
     parser.add_argument("--context-window", type=int, default=1500, help="Maximum number of tokens to use as context for generation (default: 1500)")
     parser.add_argument("--temperature", "--temp", type=float, default=0.0, help="Sampling temperature (default: 0.0 = greedy sampling, higher = more random)")
-    parser.add_argument("--hash-window", type=int, default=1, help="Number of previous tokens to hash together (default: 1)") 
+    parser.add_argument("--hash-window", type=int, default=1, help="Number of previous tokens to hash together (default: 1)")
     parser.add_argument("--n-prompts", type=int, default=1, help="Number of prompts to process (default: 1)")
     parser.add_argument("--verbose", action="store_true", help="Show detailed output and progress information")
     parser.add_argument("--stats", action="store_true", help="Show statistics summary in console (statistics are always saved to file)")
     parser.add_argument("--force-tokenization", action="store_true", help="Force detokenization and retokenization of text for decoding instead of using token IDs directly")
-    parser.add_argument("--workers", type=int, default=4, help="Number of worker processes for codebook generation (default: 4)")
-    parser.add_argument("--chunk-rows", type=int, default=None, help="Optional override for generation chunk size in rows. If not set, auto policy is used.")
     # If set, run the entire pipeline in the main process (no separate GPU worker / no IPC).
     # Useful for debugging and environments where multiprocessing is problematic or when you want deterministic,
     # step-by-step execution without producer/consumer overlap.
@@ -122,7 +125,7 @@ def main():
             print(f"Device: {device} (CUDA available and enabled)\n")
         else:
             print(f"Device: {device} (CUDA not available, falling back to CPU)\n")
-    
+
     print(f"Using secret key: {args.secret_key}\n")
 
     # Determine effective max tokens: default to u when not provided, and ensure multiple of u
@@ -164,10 +167,10 @@ def main():
             print(f"\n--- Prompt from {dataset_name}/{dataset_subset} ({dataset_split} split, {dataset_column} column) ---")
             print(prompts[0][:200] + "..." if len(prompts[0]) > 200 else prompts[0])
             print(f"{'='*60}\n")
-    
+
     total_prompts = len(prompts)
     if args.verbose:
-        print(f"Generating {effective_max_tokens} tokens per prompt with watermarking...")
+        print(f"Generating {effective_max_tokens} tokens per prompt with BCH watermarking...")
         print(f"Using dataset: {dataset_name}")
         print(f"Processing {total_prompts} prompt(s) with model: {args.model}")
 
@@ -175,11 +178,11 @@ def main():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     model_name_clean = args.model.replace("/", "_")
     dataset_name_clean = dataset_name.replace("/", "_")
-    
+
     output_subdir = f"{model_name_clean}_{dataset_name_clean}_n{args.n}_u{args.u}_{timestamp}"
     output_dir = os.path.join("output", output_subdir)
     os.makedirs(output_dir, exist_ok=True)
-    
+
     stats_file = os.path.join(output_dir, "statistics.csv")
     generations_txt_file = os.path.join(output_dir, "generations.txt")
     try:
@@ -187,10 +190,25 @@ def main():
             _f.write("")
     except Exception as e:
         print(f"Warning: Failed to initialize generations.txt: {e}")
-    
-    # Initialize per-generation outputs DataFrame (only full-length generations will be recorded)
-    generations_columns = ["codeword", "watermark", "decoded_codeword", "retrieved_watermark", "successful_watermark", "distance"]
+
+    # Initialize per-generation outputs DataFrame
+    generations_columns = ["watermark", "codeword", "decoded_codeword", "recovered_watermark", "bit_errors", "decode_success"]
     generations_df = pd.DataFrame(columns=generations_columns)
+
+    #----------------------------------------#
+    #           BCH Codec Setup              #
+    #----------------------------------------#
+
+    bch_codec = BCHCodec(
+        n=args.n,
+        u=args.u,
+        bch_m=args.bch_m,
+        bch_t=args.bch_t,
+        verbose=args.verbose
+    )
+
+    print(f"\n{format_bch_summary(bch_codec.params, args.n)}")
+    print(f"Watermark space: 2^{args.n} = {2**args.n:,} unique watermarks\n")
 
     #----------------------------------------#
     #              Watermarking              #
@@ -212,27 +230,6 @@ def main():
         'verbose': args.verbose and args.synch
     }
 
-    if args.codeword_generation == "rng":
-        generator_cls = RNGCodewordGenerator
-        generator_kwargs = {}
-    else:
-        generator_cls = BCHCodewordGenerator
-        generator_kwargs = {"t": args.bch_t, "m": args.bch_m}
-
-    base_codebook = CodebookBase(
-        n=args.n,
-        u=args.u,
-        secret_key=args.secret_key,
-        generator_cls=generator_cls,
-        generator_kwargs=generator_kwargs,
-        workers=args.workers,
-        chunk_rows=args.chunk_rows
-    )
-    if args.distance == "hamming":
-        codebook = CodebookHamming(base_codebook)
-    else:
-        codebook = CodebookLevenshtein(base_codebook)
-
     # Create decoder once (shared across all prompts)
     decoder = LLMWatermarkDecoder(
         model_name=args.model,
@@ -246,31 +243,35 @@ def main():
     )
 
     # Statistics accumulators
-    successful_watermark_recoveries = 0
-    successful_search_distances     = []    # For matches (Hamming or Levenshtein)
-    full_generation_prompts         = 0     # Count prompts with full max-tokens generation
-    properly_encoded_tokens         = 0     # Across full-length generations only
-    total_tokens_generated          = 0     # Across full-length generations only
-    codebook_search_times           = []
-    queue_wait_times                = []    # Time spent waiting for GPU queue
+    successful_decodes = 0              # BCH decode succeeded AND matched original
+    decode_failures = 0                 # BCH decode failed (too many errors)
+    bit_errors_list = []                # For successful decodes
+    full_generation_prompts = 0         # Count prompts with full max-tokens generation
+    properly_encoded_tokens = 0         # Across full-length generations only
+    total_tokens_generated = 0          # Across full-length generations only
+    bch_decode_times = []
+    queue_wait_times = []               # Time spent waiting for GPU queue
 
     #----------------------------------------#
     #     Prepare Batch Items (Producer)     #
     #----------------------------------------#
-    
-    # Pre-collect all (prompt_idx, prompt, codeword, watermark_identity) tuples
+
+    # Pre-collect all (prompt_idx, prompt, codeword, watermark_int) tuples
+    rng = np.random.default_rng(args.seed)
     batch_items = []
     for prompt_idx, prompt in enumerate(prompts):
-        codeword, watermark_identity = codebook.get_random_row(args.seed + prompt_idx)
-        batch_items.append((prompt_idx, prompt, codeword, watermark_identity))
-    
+        # Random watermark in range [0, 2^n - 1]
+        watermark_int = int(rng.integers(0, 2**args.n))
+        codeword = bch_codec.encode_int(watermark_int)
+        batch_items.append((prompt_idx, prompt, codeword, watermark_int))
+
     if args.verbose:
         print(f"\nPrepared {len(batch_items)} prompts for generation queue")
 
     #----------------------------------------#
     #   Start Generation Worker              #
     #----------------------------------------#
-    
+
     results_queue = Queue()
     # Unified interface: both modes push results into the same Queue; the consumer loop below is identical.
     gpu_process = None
@@ -296,69 +297,43 @@ def main():
     #----------------------------------------#
     #    Consumer Loop (Main Thread)         #
     #----------------------------------------#
-    
-    # Progress bar for processing (search + stats)
+
+    # Progress bar for processing (decode + stats)
     processing_progress = tqdm(
-        total=total_prompts, 
-        desc="Processing", 
-        unit="prompt", 
+        total=total_prompts,
+        desc="Processing",
+        unit="prompt",
         disable=args.verbose
     )
-    
+
     processed_count = 0
 
-    # Potential improvement: batched queue consumption for Levenshtein search with RapidFuzz cdist (multi-core search)
-    # Rationale:
-    # - GPU generation runs in a separate process, so on the consumer side we may wake up to find that
-    #   several generations are already sitting in the results queue.
-    # - This becomes common later in the runtime as the queue builds up, provided the average GPU generation
-    #   time per prompt is lower than the CPU-side codebook search time.
-    # Current behavior:
-    # - We consume one item at a time via a blocking `results_queue.get()` and perform a single-query search
-    #   (e.g., Levenshtein via RapidFuzz `process.extractOne`).
-    # Proposed (not implemented here because current runtimes are sufficient for our experiments):
-    # - Keep the initial blocking `get()` to avoid busy-waiting, then immediately drain any additional
-    #   ready items using non-blocking `get_nowait()` to form a mini-batch of decoded codewords.
-    # - For the Levenshtein metric, transform each decoded codeword into a "0101..." string and run
-    #   `rapidfuzz.distance.Levenshtein.cdist(queries, codebook.codewords_str, workers=args.workers)`.
-    #   This computes a B×N distance matrix in parallel across CPU cores (B = batch size, N = codebook size);
-    #   the best match per query is the column with the minimum distance in its row.
-    # - Map the best-match indices back to watermark identities using the base codebook and record distances
-    #   exactly as in the per-item path to keep downstream logic unchanged.
-    # Notes:
-    # - Memory: cdist materializes a B×N matrix; sub-batch the queries if N is large or memory is constrained.
-    # - Encapsulation: if we want to keep `codewords_str` private, expose it via a small accessor on the codebook.
-    # - Trigger condition: the batching path is most beneficial when generation throughput exceeds CPU search throughput
-    #   (generation time &lt; search time), which tends to be more likely after the pipeline has warmed up.
-    
     while True:
         # Block until a result is available.
-        # - Async mode: waits for IPC from the GPU worker process.
-        # - --synch mode: waits for items pushed by the inline worker; overlap is disabled so this is typically short.
         wait_start = time.time()
         item = results_queue.get()
         wait_time = time.time() - wait_start
         queue_wait_times.append(wait_time)
-        
+
         # Sentinel: None signals all generations are complete
         if item is None:
             break
-        
+
         # Handle generation errors
         if not item['success']:
             print(f"Generation failed for prompt {item['prompt_idx'] + 1}: {item.get('error', 'Unknown error')}")
             processing_progress.update(1)
             processed_count += 1
             continue
-        
+
         prompt_idx = item['prompt_idx']
         prompt = item['prompt']
         codeword = item['codeword']
-        watermark_identity = item['watermark_identity']
+        watermark_int = item['watermark_int']
         generated_ids = item['generated_ids']
         generated_text = item['generated_text']
         generation_statistics = item['generation_statistics']
-        
+
         # Verbose output for this prompt
         if args.verbose:
             print(f"\n{'='*60}")
@@ -376,23 +351,23 @@ def main():
             processing_progress.update(1)
             processed_count += 1
             continue
-        
+
         # Count prompts with full generation
         full_generation_prompts += 1
-        
-        # Decode watermark
+
+        # Decode watermark bits from generated text
         if args.force_tokenization:
             code_blocks, decoded_tokens_length = decoder.decode(generated_text)
         else:
             code_blocks, decoded_tokens_length = decoder.decode(generated_ids)
-        
+
         # Single block setup (legacy support for multi-block)
         decoded_codeword = code_blocks[0]
-        
+
         # Accumulate properly encoded token stats for full-length generations
         properly_encoded_tokens += generation_statistics.get("properly_encoded_tokens", 0)
         total_tokens_generated += generation_statistics.get("total_tokens_generated", 0)
-        
+
         # Append to generations.txt for full-length generations
         try:
             with open(generations_txt_file, 'a', encoding='utf-8') as gf:
@@ -403,44 +378,52 @@ def main():
                 gf.write(f"{'_'*14}\n")
         except Exception as e:
             print(f"Warning: Failed to write generations.txt: {e}")
-        
-        # Find closest match using codebook search (CPU-intensive)
-        search_start = time.time()
-        best_codeword_match, retrieved_watermark, search_distance = codebook.find_closest_match(decoded_codeword)
-        search_time = time.time() - search_start
-        codebook_search_times.append(search_time)
-        
+
+        # BCH decode to recover watermark
+        decode_start = time.time()
+        recovered_watermark, bit_errors = bch_codec.decode_int(decoded_codeword)
+        decode_time = time.time() - decode_start
+        bch_decode_times.append(decode_time)
+
+        # Determine decode success
+        # BCH decode fails if bit_errors > t (indicated by bit_errors == n0)
+        decode_failed = (bit_errors >= bch_codec.native_codeword_length)
+        decode_success = not decode_failed and (recovered_watermark == watermark_int)
+
+        if decode_failed:
+            decode_failures += 1
+        elif recovered_watermark == watermark_int:
+            successful_decodes += 1
+            bit_errors_list.append(bit_errors)
+
         if args.verbose:
             print(f"\tQueue wait: {wait_time * 1000:.2f} ms")
-            print(f"\tSearch time: {search_time * 1000:.2f} ms\n")
-        
+            print(f"\tBCH decode time: {decode_time * 1000:.2f} ms")
+            print(f"\tOriginal watermark: {watermark_int}")
+            print(f"\tRecovered watermark: {recovered_watermark}")
+            print(f"\tBit errors: {bit_errors}")
+            print(f"\tDecode success: {decode_success}\n")
+
         # Convert to string for easier output
         codeword_str = ''.join(map(str, codeword))
         decoded_codeword_str = ''.join(map(str, decoded_codeword))
-        
-        # Check if watermarking was successful
-        successful_watermark_flag = bool(retrieved_watermark == watermark_identity)
-        if successful_watermark_flag:
-            successful_watermark_recoveries += 1
-            successful_search_distances.append(search_distance)
-        
+
         # Record in DataFrame
         generations_df.loc[len(generations_df)] = {
+            "watermark": int(watermark_int),
             "codeword": codeword_str,
-            "watermark": int(watermark_identity),
             "decoded_codeword": decoded_codeword_str,
-            "retrieved_watermark": retrieved_watermark,
-            "successful_watermark": successful_watermark_flag,
-            "distance": search_distance,
+            "recovered_watermark": int(recovered_watermark),
+            "bit_errors": int(bit_errors),
+            "decode_success": decode_success,
         }
-        
+
         processing_progress.update(1)
         processed_count += 1
-    
+
     processing_progress.close()
-    
+
     # Wait for worker process to finish (only applicable in async mode).
-    # Guarded join keeps linters happy and avoids referencing an unbound variable in --synch runs.
     if gpu_process is not None:
         gpu_process.join()
 
@@ -449,13 +432,13 @@ def main():
     #----------------------------------------#
 
     # Calculate timing averages once
-    avg_codebook_search_time = 1000 * float(np.mean(codebook_search_times)) if codebook_search_times else 0.0
+    avg_bch_decode_time = 1000 * float(np.mean(bch_decode_times)) if bch_decode_times else 0.0
     avg_queue_wait_time = 1000 * float(np.mean(queue_wait_times)) if queue_wait_times else 0.0
     total_queue_wait_time_seconds = float(np.sum(queue_wait_times)) if queue_wait_times else 0.0
 
     # Create results file with parameters and statistics
     results_file = os.path.join(output_dir, "results.txt")
-    
+
     with open(results_file, 'w') as f:
         # Write parameter information at the top
         f.write("=" * 60 + "\n")
@@ -463,8 +446,9 @@ def main():
         f.write("=" * 60 + "\n")
         f.write(f"Model: {args.model}\n")
         f.write(f"Dataset: {dataset_name}/{dataset_subset} ({dataset_split} split, {dataset_column} column)\n")
-        f.write(f"n (code table size): {args.n}\n")
-        f.write(f"u (code size): {args.u}\n")
+        f.write(f"n (watermark bits): {args.n}\n")
+        f.write(f"u (codeword length): {args.u}\n")
+        f.write(f"BCH parameters: {format_bch_summary(bch_codec.params, args.n)}\n")
         f.write(f"Number of prompts: {args.n_prompts}\n")
         f.write(f"Max tokens (requested): {args.max_tokens if args.max_tokens is not None else 'None (default -> u)'}\n")
         f.write(f"Max tokens (effective): {effective_max_tokens}\n")
@@ -476,56 +460,59 @@ def main():
         f.write(f"Device: {device}\n")
         f.write(f"Timestamp: {timestamp}\n")
         f.write("\n")
-        
+
         # Write results
         f.write("=" * 60 + "\n")
         f.write("RESULTS\n")
         f.write("=" * 60 + "\n")
         f.write(f"Total prompts processed: {total_prompts}\n")
         f.write(f"Prompts with full generation: {full_generation_prompts}\n")
-        f.write(f"Successful watermark recoveries: {successful_watermark_recoveries} out of {full_generation_prompts}\n")
-        
+        f.write(f"Successful watermark recoveries: {successful_decodes} out of {full_generation_prompts}\n")
+        f.write(f"BCH decode failures (too many errors): {decode_failures}\n")
+
         if full_generation_prompts > 0:
-            success_rate = successful_watermark_recoveries / full_generation_prompts * 100
+            success_rate = successful_decodes / full_generation_prompts * 100
             f.write(f"Success rate: {success_rate:.2f}%\n")
-        
+
         # Properly encoded tokens summary across full-length generations
         if total_tokens_generated > 0:
             pct_proper = properly_encoded_tokens / total_tokens_generated * 100
         else:
             pct_proper = 0.0
         f.write(f"Properly encoded tokens: {properly_encoded_tokens} / {total_tokens_generated} ({pct_proper:.2f}%)\n")
-        
+
         f.write("\n")
-        
-        # Write distance statistics
-        if successful_search_distances:
-            avg_successful = np.mean(successful_search_distances)
-            min_successful = np.min(successful_search_distances)
-            max_successful = np.max(successful_search_distances)
-            f.write(f"Average {args.distance} distance for successful recoveries: {avg_successful:.2f}\n")
-            f.write(f"Min {args.distance} distance for successful recoveries: {int(min_successful)}\n")
-            f.write(f"Max {args.distance} distance for successful recoveries: {int(max_successful)}\n")
+
+        # Write bit error statistics
+        if bit_errors_list:
+            avg_bit_errors = np.mean(bit_errors_list)
+            min_bit_errors = np.min(bit_errors_list)
+            max_bit_errors = np.max(bit_errors_list)
+            f.write(f"Average bit errors for successful recoveries: {avg_bit_errors:.2f}\n")
+            f.write(f"Min bit errors for successful recoveries: {int(min_bit_errors)}\n")
+            f.write(f"Max bit errors for successful recoveries: {int(max_bit_errors)}\n")
         else:
-            f.write(f"No successful recoveries to calculate {args.distance} distance statistics\n")
+            f.write(f"No successful recoveries to calculate bit error statistics\n")
 
         # Timing statistics
-        f.write(f"Average search time ({args.distance}): {avg_codebook_search_time:.2f} ms\n")
+        f.write(f"Average BCH decode time: {avg_bch_decode_time:.2f} ms\n")
         f.write(f"Average queue wait time: {avg_queue_wait_time:.2f} ms\n")
         f.write(f"Total queue wait time: {total_queue_wait_time_seconds:.2f} s\n")
 
-    print(f"\bResults saved to: {results_file}")
-    print(f"Made {successful_watermark_recoveries} successful watermark recoveries out of {full_generation_prompts}")
-    
-    # Calculate and display average distances
-    if successful_search_distances:
-        avg_successful = np.mean(successful_search_distances)
-        print(f"Average {args.distance} distance for successful recoveries: {avg_successful:.2f}")
+    print(f"\nResults saved to: {results_file}")
+    print(f"Made {successful_decodes} successful watermark recoveries out of {full_generation_prompts}")
+    if decode_failures > 0:
+        print(f"BCH decode failures: {decode_failures}")
+
+    # Calculate and display average bit errors
+    if bit_errors_list:
+        avg_bit_errors = np.mean(bit_errors_list)
+        print(f"Average bit errors for successful recoveries: {avg_bit_errors:.2f}")
     else:
-        print(f"No successful recoveries to calculate average {args.distance} distance")
-    
-    # Display average search time and queue wait time
-    print(f"Average {args.distance} search time: {avg_codebook_search_time:.2f} ms")
+        print(f"No successful recoveries to calculate average bit errors")
+
+    # Display average decode time and queue wait time
+    print(f"Average BCH decode time: {avg_bch_decode_time:.2f} ms")
     print(f"Average queue wait time: {avg_queue_wait_time:.2f} ms")
 
     # Save per-generation outputs (CSV) alongside results.txt
@@ -534,6 +521,7 @@ def main():
         generations_df.to_csv(generations_csv, index=False)
     except Exception as e:
         print(f"Warning: Failed to save CSV: {e}")
+
 
 if __name__ == "__main__":
     import multiprocessing as mp
