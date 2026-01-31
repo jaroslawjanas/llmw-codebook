@@ -7,6 +7,7 @@ Unlike codebook-based approaches, BCH directly recovers the watermark via syndro
 
 import argparse
 import random
+import json
 import numpy as np
 import torch
 import pandas as pd
@@ -521,6 +522,54 @@ def main():
         generations_df.to_csv(generations_csv, index=False)
     except Exception as e:
         print(f"Warning: Failed to save CSV: {e}")
+
+    # Save config.json with experiment parameters
+    config = {
+        "experiment": {
+            "timestamp": timestamp,
+            "seed": args.seed,
+        },
+        "model": {
+            "name": args.model,
+            "device": device,
+        },
+        "dataset": {
+            "name": dataset_name,
+            "config": dataset_subset,
+            "split": dataset_split,
+            "column": dataset_column,
+            "n_prompts": args.n_prompts,
+        },
+        "watermark": {
+            "n": args.n,
+            "u": args.u,
+            "secret_key": args.secret_key,
+            "green_fraction": args.green_fraction,
+            "bias": args.bias,
+        },
+        "bch": {
+            "m": bch_codec.params.m,
+            "n0": bch_codec.params.n0,
+            "k": bch_codec.params.k,
+            "t": bch_codec.params.t,
+            "padding": bch_codec.params.padding,
+            "puncturing": bch_codec.params.puncturing,
+        },
+        "generation": {
+            "max_tokens_requested": args.max_tokens,
+            "max_tokens_effective": effective_max_tokens,
+            "context_window": args.context_window,
+            "temperature": args.temperature,
+            "hash_window": args.hash_window,
+        },
+    }
+
+    config_file = os.path.join(output_dir, "config.json")
+    try:
+        with open(config_file, 'w') as f:
+            json.dump(config, f, indent=2)
+    except Exception as e:
+        print(f"Warning: Failed to save config.json: {e}")
 
 
 if __name__ == "__main__":
