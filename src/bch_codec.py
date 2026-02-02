@@ -186,8 +186,14 @@ class BCHCodec:
 
             msg = np.array(decoded_msg, dtype=np.uint8)
 
+            # Reset padding bits to zeros before re-encoding (matches original encoding)
+            # BCH may decode padding bits (positions n to k-1) to non-zero values,
+            # but the original encoder always uses zeros for padding.
+            msg_for_reencoding = msg.copy()
+            msg_for_reencoding[self.n:] = 0
+
             # Calculate bit errors by re-encoding and comparing
-            corrected_cw = np.array(self._bch.encode(self._GF2(msg)), dtype=np.uint8)
+            corrected_cw = np.array(self._bch.encode(self._GF2(msg_for_reencoding)), dtype=np.uint8)
 
             # Compare only the non-punctured portion
             if self.params.puncturing > 0:
