@@ -134,7 +134,7 @@ def load_by_model(
           - decoded_codeword: str
           - recovered_watermark: int64
           - bit_errors: int64
-          - decode_success: bool
+          - successful_watermark: bool
           - dataset: str (added - source dataset name)
 
     Raises:
