@@ -193,7 +193,7 @@ def main():
         print(f"Warning: Failed to initialize generations.txt: {e}")
 
     # Initialize per-generation outputs DataFrame
-    generations_columns = ["watermark", "codeword", "decoded_codeword", "recovered_watermark", "bit_errors", "decode_success"]
+    generations_columns = ["watermark", "codeword", "decoded_codeword", "recovered_watermark", "bit_errors", "successful_watermark"]
     generations_df = pd.DataFrame(columns=generations_columns)
 
     #----------------------------------------#
@@ -389,7 +389,7 @@ def main():
         # Determine decode success
         # BCH decode fails if bit_errors > t (indicated by bit_errors == n0)
         decode_failed = (bit_errors >= bch_codec.native_codeword_length)
-        decode_success = not decode_failed and (recovered_watermark == watermark_int)
+        successful_watermark = not decode_failed and (recovered_watermark == watermark_int)
 
         if decode_failed:
             decode_failures += 1
@@ -403,7 +403,7 @@ def main():
             print(f"\tOriginal watermark: {watermark_int}")
             print(f"\tRecovered watermark: {recovered_watermark}")
             print(f"\tBit errors: {bit_errors}")
-            print(f"\tDecode success: {decode_success}\n")
+            print(f"\tDecode success: {successful_watermark}\n")
 
         # Convert to string for easier output
         codeword_str = ''.join(map(str, codeword))
@@ -416,7 +416,7 @@ def main():
             "decoded_codeword": decoded_codeword_str,
             "recovered_watermark": int(recovered_watermark),
             "bit_errors": int(bit_errors),
-            "decode_success": decode_success,
+            "successful_watermark": successful_watermark,
         }
 
         processing_progress.update(1)
