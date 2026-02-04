@@ -176,7 +176,7 @@ def main():
     model_name_clean = args.model.replace("/", "_")
     dataset_name_clean = dataset_name.replace("/", "_")
     
-    output_subdir = f"{model_name_clean}_{dataset_name_clean}_n{args.n}_u{args.u}_{timestamp}"
+    output_subdir = f"{model_name_clean}_{dataset_name_clean}_n{args.n}_u{args.u}_{args.distance}_{timestamp}"
     output_dir = os.path.join("output", output_subdir)
     os.makedirs(output_dir, exist_ok=True)
     
