@@ -213,41 +213,51 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
             )
             self.model.to(self.device)
             
-    def _trim_past_key_values(self, past_key_values: Tuple, trim_amount: int) -> Tuple:
+    def _trim_past_key_values(self, past_key_values, trim_amount: int):
         """
         Trim the K/V cache by removing the oldest entries.
-        
+        Supports both legacy tuple format and modern Cache objects (transformers 4.36+).
+
         This method is essential for K/V caching because:
         1. Memory Management: K/V caches grow linearly with sequence length, potentially causing OOM errors
         2. Context Window Limits: Models have maximum context windows (e.g., 2048, 4096 tokens)
         3. Performance: Without trimming, the cache would grow indefinitely during long text generation
         4. Correctness: Prevents exceeding model's positional encoding limits
-        
+
         The method removes the oldest tokens from the beginning of the cache while preserving
         the most recent context, which is typically most relevant for generation.
-        
+
         Args:
-            past_key_values: Tuple of past key values from the model
+            past_key_values: Tuple of past key values OR a Cache object from the model
             trim_amount: Number of positions to remove from the beginning
-            
+
         Returns:
-            Trimmed past_key_values tuple
+            Trimmed past_key_values (same type as input)
         """
+        # Handle modern DynamicCache objects (transformers 4.36+)
+        # These have key_cache and value_cache attributes as lists of tensors
+        if hasattr(past_key_values, 'key_cache') and hasattr(past_key_values, 'value_cache'):
+            # Trim in place by slicing each layer's tensors
+            for i in range(len(past_key_values.key_cache)):
+                past_key_values.key_cache[i] = past_key_values.key_cache[i][:, :, trim_amount:, :]
+                past_key_values.value_cache[i] = past_key_values.value_cache[i][:, :, trim_amount:, :]
+            return past_key_values
+
+        # Handle legacy tuple format (older transformers versions)
+        # Each layer_past is a tuple of (key, value) tensors
         trimmed_past = []
-        
-        # Iterate through each layer's key-value pairs
         for layer_past in past_key_values:
             # Each layer_past is a tuple of (key, value) tensors
             # Shape: (batch_size, num_heads, sequence_length, head_dim)
             key, value = layer_past
-            
+
             # Trim the sequence dimension (dimension 2) by removing oldest tokens
             trimmed_key = key[:, :, trim_amount:, :]
             trimmed_value = value[:, :, trim_amount:, :]
-            
+
             # Append the trimmed tuple for this layer
             trimmed_past.append((trimmed_key, trimmed_value))
-        
+
         return tuple(trimmed_past)
         
     def _modify_logits(self, logits: torch.Tensor, token_id: int, bias_type: str) -> torch.Tensor:
