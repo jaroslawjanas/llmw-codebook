@@ -84,7 +84,6 @@ def main():
     parser.add_argument("--u", type=int, default=100, help="Codeword length in bits (tokens per watermark)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--secret-key", type=str, default="25111915", help="Secret key used for watermarking (string)")
-    parser.add_argument("--bch-t", type=int, default=None, help="BCH error-correction capability t (if None, auto-select maximum)")
     parser.add_argument("--bch-m", type=int, default=None, help="BCH field degree m (n0=2^m-1). If None, auto-select optimal")
     parser.add_argument("--prompt", type=str, help="Custom prompt (uses random essay from dataset if not provided)")
     parser.add_argument("--dataset", type=str, nargs=4, default=["ChristophSchuhmann/essays-with-instructions", "default", "train", "instructions"],
@@ -204,7 +203,6 @@ def main():
         n=args.n,
         u=args.u,
         bch_m=args.bch_m,
-        bch_t=args.bch_t,
         verbose=args.verbose
     )
 

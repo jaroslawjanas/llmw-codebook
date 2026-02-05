@@ -56,27 +56,24 @@ class BCHCodec:
         n: int,
         u: int,
         bch_m: Optional[int] = None,
-        bch_t: Optional[int] = None,
         verbose: bool = False,
     ) -> None:
         self.n = n  # Message length (watermark bits)
         self.u = u  # Desired codeword length
 
-        # Select BCH parameters
-        self.params = select_bch_parameters(n, u, m=bch_m, t=bch_t)
+        # Select BCH parameters (t=0 placeholder)
+        self.params = select_bch_parameters(n, u, m=bch_m)
 
-        # Create the BCH code
-        d = 2 * self.params.t + 1
-        self._bch = galois.BCH(self.params.n0, d=d)
+        # Create BCH code using k - galois gives maximum t for this k
+        self._bch = galois.BCH(self.params.n0, k=self.params.k)
         self._GF2 = galois.GF(2)
 
-        # Store manual flags for warnings
-        self._manual_m = bch_m is not None
-        self._manual_t = bch_t is not None
+        # Set actual t from galois (replaces placeholder)
+        self.params.t = int(self._bch.t)
 
         if verbose:
             print(format_bch_summary(self.params, n))
-            print_bch_warnings(n, u, self.params, self._manual_m, self._manual_t)
+            print_bch_warnings(n, u, self.params)
 
     @property
     def message_length(self) -> int:
@@ -285,7 +282,6 @@ def create_bch_codec(
     n: int,
     u: int,
     bch_m: Optional[int] = None,
-    bch_t: Optional[int] = None,
     verbose: bool = False,
 ) -> BCHCodec:
     """
@@ -295,10 +291,9 @@ def create_bch_codec(
         n: Message length in bits (watermark size)
         u: Desired output codeword length in bits
         bch_m: Optional manual field degree (n0 = 2^m - 1)
-        bch_t: Optional manual error correction capability
         verbose: Print BCH configuration and warnings
 
     Returns:
         Configured BCHCodec instance
     """
-    return BCHCodec(n, u, bch_m, bch_t, verbose)
+    return BCHCodec(n, u, bch_m, verbose)
