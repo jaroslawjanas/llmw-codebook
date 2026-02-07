@@ -179,7 +179,46 @@ def main():
     output_subdir = f"{model_name_clean}_{dataset_name_clean}_n{args.n}_u{args.u}_{args.distance}_{timestamp}"
     output_dir = os.path.join("output", output_subdir)
     os.makedirs(output_dir, exist_ok=True)
-    
+
+    # Save experiment configuration as JSON for downstream tooling
+    config = {
+        "model": {
+            "name": args.model,
+            "context_window": args.context_window,
+        },
+        "dataset": {
+            "name": dataset_name,
+            "subset": dataset_subset,
+            "split": dataset_split,
+            "column": dataset_column,
+        },
+        "watermark": {
+            "n": args.n,
+            "u": args.u,
+            "secret_key": args.secret_key,
+            "green_fraction": args.green_fraction,
+            "bias": args.bias,
+            "hash_window": args.hash_window,
+            "codeword_generation": args.codeword_generation,
+            "distance": args.distance,
+            "bch_t": args.bch_t,
+            "bch_m": args.bch_m,
+        },
+        "generation": {
+            "max_tokens": args.max_tokens,
+            "effective_max_tokens": effective_max_tokens,
+            "temperature": args.temperature,
+            "n_prompts": args.n_prompts,
+            "seed": args.seed,
+        },
+        "experiment": {
+            "timestamp": timestamp,
+            "device": device,
+        },
+    }
+    with open(os.path.join(output_dir, "config.json"), "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2)
+
     stats_file = os.path.join(output_dir, "statistics.csv")
     generations_txt_file = os.path.join(output_dir, "generations.txt")
     try:
