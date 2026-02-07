@@ -22,7 +22,7 @@ from tqdm import tqdm
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from scripts.utils import discover_experiments, load_by_model
+from scripts.utils import discover_experiments, load_and_merge
 from src.bch_codec import BCHCodec
 
 
@@ -393,7 +393,8 @@ def main() -> None:
 
     for model in models:
         print(f"\nProcessing {shorten_model_name(model)}...")
-        df = load_by_model(model)
+        model_paths = matching[matching["model"] == model]["path"].tolist()
+        df = load_and_merge(model_paths)
         print(f"  Loaded {len(df)} samples")
 
         attack_results = {}

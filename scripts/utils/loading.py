@@ -116,45 +116,26 @@ def load_experiment(experiment_dir: Path | str) -> dict:
     }
 
 
-def load_by_model(
-    model: str,
-    output_dir: Path | str = None
-) -> pd.DataFrame:
+def load_and_merge(experiment_paths: list[Path]) -> pd.DataFrame:
     """
-    Load and merge all experiments for a specific model.
+    Load multiple experiments by path and merge into one DataFrame.
 
     Args:
-        model: Model name (e.g., 'meta-llama/Llama-3.2-3B')
-        output_dir: Output directory (default: project output/)
+        experiment_paths: List of paths to experiment directories
 
     Returns:
-        DataFrame with columns:
-          - watermark: int64
-          - codeword: str
-          - decoded_codeword: str
-          - recovered_watermark: int64
-          - bit_errors: int64
-          - successful_watermark: bool
-          - dataset: str (added - source dataset name)
+        DataFrame with columns from generations.csv plus:
+          - dataset: str (short dataset name, e.g., 'HC3')
 
     Raises:
-        ValueError: If no experiments found for the specified model
+        ValueError: If experiment_paths is empty
     """
-    experiments = discover_experiments(output_dir)
-
-    # Filter to matching model
-    model_experiments = experiments[experiments["model"] == model]
-
-    if model_experiments.empty:
-        available_models = experiments["model"].unique().tolist()
-        raise ValueError(
-            f"No experiments found for model '{model}'. "
-            f"Available models: {available_models}"
-        )
+    if not experiment_paths:
+        raise ValueError("No experiment paths provided")
 
     dfs = []
-    for _, row in model_experiments.iterrows():
-        exp = load_experiment(row["path"])
+    for path in experiment_paths:
+        exp = load_experiment(path)
         df = exp["generations"].copy()
 
         # Extract dataset name (last part after /)

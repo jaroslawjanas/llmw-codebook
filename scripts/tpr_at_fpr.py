@@ -24,7 +24,7 @@ from tqdm import tqdm
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from scripts.utils import discover_experiments, load_by_model
+from scripts.utils import discover_experiments, load_and_merge
 from src.bch_codec import BCHCodec
 
 
@@ -137,6 +137,7 @@ def find_fpr_threshold(
 
 def calculate_tpr_for_model(
     model: str,
+    model_paths: list,
     threshold: int,
 ) -> tuple[dict, np.ndarray]:
     """
@@ -144,6 +145,7 @@ def calculate_tpr_for_model(
 
     Args:
         model: Model name
+        model_paths: List of experiment directory paths for this model
         threshold: bit_error threshold (samples <= threshold are positives)
 
     Returns:
@@ -151,7 +153,7 @@ def calculate_tpr_for_model(
         - stats_dict: model, total, tp, tpr, match_rate
         - bit_errors_array: bit_errors for successful watermarks (for histogram)
     """
-    df = load_by_model(model)
+    df = load_and_merge(model_paths)
 
     total_samples = len(df)
 
@@ -438,7 +440,8 @@ def main() -> None:
     model_bit_errors = {}  # Per-model bit errors for histogram
 
     for model in tqdm(models, desc="Calculating TPR"):
-        stats, bit_errors = calculate_tpr_for_model(model, threshold)
+        model_paths = matching[matching["model"] == model]["path"].tolist()
+        stats, bit_errors = calculate_tpr_for_model(model, model_paths=model_paths, threshold=threshold)
         results.append(stats)
         model_bit_errors[model] = bit_errors
 
