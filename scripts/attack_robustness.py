@@ -4,13 +4,14 @@ BCH Attack Robustness Analysis Script.
 Tests how watermark detection degrades under substitution, insertion, and
 deletion attacks applied to decoded codewords.
 
-For each attack type, iterates from budget=0 to max_budget and measures the
-match rate (successful watermark recovery / total samples).
+For each attack type, iterates from budget=0 to max_budget and measures
+TPR at a fixed FPR threshold (default 1%).
 """
 
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +23,7 @@ from tqdm import tqdm
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from scripts.tpr_at_fpr import find_fpr_threshold, generate_negative_bit_errors
 from scripts.utils import discover_experiments, load_and_merge
 from src.bch_codec import BCHCodec
 
@@ -43,15 +45,29 @@ def parse_args() -> argparse.Namespace:
         help="Attack budget: if < 1.0, percentage of u; if >= 1, absolute number of bits (default: 0.1 = 10%%)"
     )
     parser.add_argument(
+        "--z", type=int, default=50000,
+        help="Number of random samples for FPR threshold estimation (default: 50000, min: 1000)"
+    )
+    parser.add_argument(
+        "--fpr-target", type=float, default=0.01,
+        help="Target FPR (default: 0.01 = 1%%)"
+    )
+    parser.add_argument(
         "--seed", type=int, default=42,
         help="Random seed (default: 42)"
     )
 
     args = parser.parse_args()
 
+    if args.z < 1000:
+        parser.error(f"--z must be at least 1000, got {args.z}")
+
+    if not (0 < args.fpr_target < 1):
+        parser.error(f"--fpr-target must be between 0 and 1 (exclusive), got {args.fpr_target}")
+
     # Convert budget to integer
     if args.attack_budget < 1.0:
-        args.max_budget = int(args.attack_budget * args.u)
+        args.max_budget = math.ceil(args.attack_budget * args.u)
     else:
         args.max_budget = int(args.attack_budget)
 
@@ -172,58 +188,60 @@ def evaluate_attack_robustness(
     bch_codec: BCHCodec,
     attack_fn: Callable[[np.ndarray, int, np.random.Generator], np.ndarray],
     max_budget: int,
+    threshold: int,
     seed: int,
     attack_name: str,
 ) -> dict[int, float]:
     """
-    Evaluate match rate at each attack budget level.
+    Evaluate TPR at each attack budget level.
 
     For each budget from 0 to max_budget:
     1. Apply attack to each row's decoded_codeword
     2. BCH decode the attacked codeword
-    3. Check if recovered_watermark matches original watermark
-    4. Calculate match_rate = successful_matches / total_samples
+    3. Check if bit_errors <= threshold (true positive)
+    4. Calculate TPR = true_positives / total_samples
 
     Args:
-        df: DataFrame with 'watermark' and 'decoded_codeword' columns
+        df: DataFrame with 'decoded_codeword' column
         bch_codec: BCH codec instance
         attack_fn: Attack function (substitution, insertion, or deletion)
         max_budget: Maximum attack budget
+        threshold: bit_error threshold from FPR analysis
         seed: Random seed
         attack_name: Name of attack for progress bar
 
     Returns:
-        Dict mapping budget -> match_rate
+        Dict mapping budget -> tpr
     """
     results = {}
 
-    # Pre-convert data for efficiency
-    watermarks = df["watermark"].values
+    # Pre-convert data for efficiency (only successful watermarks, but total includes all)
+    total = len(df)
+    successful = df[df["successful_watermark"]]
     decoded_codewords = [
         np.array([int(b) for b in str(cw)], dtype=np.uint8)
-        for cw in df["decoded_codeword"].values
+        for cw in successful["decoded_codeword"].values
     ]
-    total = len(watermarks)
 
     for budget in tqdm(range(max_budget + 1), desc=f"  {attack_name}"):
         # Use seed + budget for reproducibility with different random selections per budget
         rng = np.random.default_rng(seed + budget)
 
-        matches = 0
+        tp = 0
 
-        for original_watermark, decoded_codeword in zip(watermarks, decoded_codewords):
+        for decoded_codeword in decoded_codewords:
             # Apply attack
             attacked_codeword = attack_fn(decoded_codeword, budget, rng)
 
             # BCH decode
-            recovered_watermark, _ = bch_codec.decode_int(attacked_codeword)
+            _, bit_errors = bch_codec.decode(attacked_codeword)
 
-            # Check match
-            if recovered_watermark == original_watermark:
-                matches += 1
+            # Check if within threshold
+            if bit_errors <= threshold:
+                tp += 1
 
-        match_rate = matches / total if total > 0 else 0.0
-        results[budget] = match_rate
+        tpr = tp / total if total > 0 else 0.0
+        results[budget] = tpr
 
     return results
 
@@ -233,6 +251,7 @@ def create_model_plot(
     substitution_results: dict[int, float],
     insertion_results: dict[int, float],
     deletion_results: dict[int, float],
+    actual_fpr: float,
     args: argparse.Namespace,
     output_path: Path
 ) -> None:
@@ -240,8 +259,8 @@ def create_model_plot(
     Create a PNG with 3 subplots (substitution, insertion, deletion).
 
     X-axis: Number of adversarial interventions
-    Y-axis: Recovery Rate (%)
-    Green dashed baseline showing budget=0 recovery rate.
+    Y-axis: TPR at target FPR (%)
+    Green dashed baseline showing budget=0 TPR.
     """
     try:
         import matplotlib.pyplot as plt
@@ -281,7 +300,7 @@ def create_model_plot(
                         xytext=(0, y_offset), ha='center', fontsize=7, color='#333333')
 
         ax.set_xlabel('Number of adversarial interventions')
-        ax.set_ylabel('Recovery Rate (%)')
+        ax.set_ylabel(f'TPR @ FPR={actual_fpr * 100:.2f}%')
         ax.set_title(attack_name)
         ax.set_ylim(0, 100)
         ax.set_xlim(budgets[0], budgets[-1])
@@ -290,7 +309,7 @@ def create_model_plot(
         ax.grid(True, alpha=0.3)
 
     plt.suptitle(
-        f'Attack Robustness: {shorten_model_name(model)} (n={args.n}, u={args.u})',
+        f'Attack Robustness: {shorten_model_name(model)} (n={args.n}, u={args.u}, FPR={actual_fpr * 100:.2f}%)',
         fontsize=12,
         fontweight='bold'
     )
@@ -302,6 +321,8 @@ def create_model_plot(
 
 def create_results_txt(
     args: argparse.Namespace,
+    threshold: int,
+    actual_fpr: float,
     all_results: dict[str, dict[str, dict[int, float]]],
     output_path: Path
 ) -> None:
@@ -315,6 +336,10 @@ def create_results_txt(
         f.write(f"  n (watermark bits): {args.n}\n")
         f.write(f"  u (codeword length): {args.u}\n")
         f.write(f"  max attack budget: {args.max_budget} bits\n")
+        f.write(f"  z (negative samples): {args.z}\n")
+        f.write(f"  target FPR: {args.fpr_target * 100:.2f}%\n")
+        f.write(f"  bit_error threshold: {threshold}\n")
+        f.write(f"  actual FPR: {actual_fpr * 100:.2f}%\n")
         f.write(f"  seed: {args.seed}\n\n")
 
         for model, attack_results in all_results.items():
@@ -324,8 +349,8 @@ def create_results_txt(
 
             for attack_type, results in attack_results.items():
                 f.write(f"  {attack_type}:\n")
-                f.write(f"    Baseline (budget=0): {results[0]:.4f}\n")
-                f.write(f"    Final (budget={args.max_budget}): {results[args.max_budget]:.4f}\n")
+                f.write(f"    TPR baseline (budget=0): {results[0]:.4f}\n")
+                f.write(f"    TPR final (budget={args.max_budget}): {results[args.max_budget]:.4f}\n")
 
                 # Find 50% degradation point
                 baseline = results[0]
@@ -336,7 +361,7 @@ def create_results_txt(
                             half_point = budget
                             break
                     if half_point:
-                        f.write(f"    50% degradation at budget: {half_point}\n")
+                        f.write(f"    50% TPR degradation at budget: {half_point}\n")
                 f.write("\n")
 
         # Summary table
@@ -344,7 +369,7 @@ def create_results_txt(
         f.write("Summary Table\n")
         f.write("=" * 70 + "\n\n")
 
-        header = f"{'Model':<40} {'Attack':<15} {'Baseline':>10} {'Final':>10}\n"
+        header = f"{'Model':<40} {'Attack':<15} {'TPR base':>10} {'TPR final':>10}\n"
         f.write(header)
         f.write("-" * 75 + "\n")
 
@@ -381,6 +406,17 @@ def main() -> None:
     # Create BCH codec
     bch_codec = BCHCodec(n=args.n, u=args.u, verbose=True)
 
+    # Compute FPR threshold once
+    print(f"Generating {args.z} random samples for FPR threshold...")
+    negative_bit_errors = generate_negative_bit_errors(
+        bch_codec=bch_codec,
+        z=args.z,
+        seed=args.seed,
+    )
+    threshold, actual_fpr = find_fpr_threshold(negative_bit_errors, args.fpr_target)
+    print(f"FPR threshold: bit_errors <= {threshold}")
+    print(f"Actual FPR: {actual_fpr * 100:.2f}%\n")
+
     # Create output directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = Path(__file__).parent.parent / "output" / (
@@ -401,17 +437,17 @@ def main() -> None:
 
         # Substitution attack
         attack_results["Substitution"] = evaluate_attack_robustness(
-            df, bch_codec, apply_substitution_attack, args.max_budget, args.seed, "Substitution"
+            df, bch_codec, apply_substitution_attack, args.max_budget, threshold, args.seed, "Substitution"
         )
 
         # Insertion attack
         attack_results["Insertion"] = evaluate_attack_robustness(
-            df, bch_codec, apply_insertion_attack, args.max_budget, args.seed, "Insertion"
+            df, bch_codec, apply_insertion_attack, args.max_budget, threshold, args.seed, "Insertion"
         )
 
         # Deletion attack
         attack_results["Deletion"] = evaluate_attack_robustness(
-            df, bch_codec, apply_deletion_attack, args.max_budget, args.seed, "Deletion"
+            df, bch_codec, apply_deletion_attack, args.max_budget, threshold, args.seed, "Deletion"
         )
 
         all_results[model] = attack_results
@@ -423,13 +459,14 @@ def main() -> None:
             substitution_results=attack_results["Substitution"],
             insertion_results=attack_results["Insertion"],
             deletion_results=attack_results["Deletion"],
+            actual_fpr=actual_fpr,
             args=args,
             output_path=output_dir / f"{short_model}_robustness.png"
         )
         print(f"  Saved plot: {short_model}_robustness.png")
 
     # Create summary results file
-    create_results_txt(args, all_results, output_dir / "results.txt")
+    create_results_txt(args, threshold, actual_fpr, all_results, output_dir / "results.txt")
 
     # Print summary
     print(f"\n{'=' * 60}")
