@@ -486,7 +486,7 @@ def create_histogram(
         # Threshold line (offset +0.5 to center between bins)
         ax.axvline(x=threshold + 0.5, color="black", linestyle="--", linewidth=1.5, label=f"Threshold={threshold}")
 
-        ax.set_xlabel("Bit Errors")
+        ax.set_xlabel("Distance")
         ax.set_ylabel("Density")
         ax.set_title(shorten_model_name(model))
         ax.legend(fontsize=8)
@@ -500,7 +500,7 @@ def create_histogram(
 
     fpr_pct = actual_fpr * 100
     plt.suptitle(
-        f"Bit Error Distributions (n={args.n}, u={args.u}, FPR={fpr_pct:.2f}%)",
+        f"Distance Distribution (n={args.n}, u={args.u}, FPR={fpr_pct:.2f}%)",
         fontsize=14, fontweight="bold",
     )
     plt.tight_layout()
