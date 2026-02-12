@@ -8,10 +8,10 @@ TPR @ Target FPR Analysis
 - Prints a summary table and generates a per-model histogram plot.
 
 Usage examples:
-  python scripts/tpr_at_fpr.py --n 20 --u 128 --distance hamming --verbose
-  python scripts/tpr_at_fpr.py --n 20 --u 128 --distance hamming --z 50000 --fpr-target 0.01
-  python scripts/tpr_at_fpr.py --n 20 --u 128 --distance hamming --include-models Llama-3.2-3B --no-show
-  python scripts/tpr_at_fpr.py --n 16 --u 128 --distance levenshtein --codebook-generation bch --bch-m 8 --bch-t 7
+  python scripts/tpr_at_fpr.py --n 20 --u 128 --z 10000 --distance hamming --verbose
+  python scripts/tpr_at_fpr.py --n 20 --u 128 --z 50000 --distance hamming --fpr-target 0.01
+  python scripts/tpr_at_fpr.py --n 20 --u 128 --z 10000 --distance hamming --include-models Llama-3.2-3B
+  python scripts/tpr_at_fpr.py --n 16 --u 128 --z 10000 --distance levenshtein --codebook-generation bch --bch-m 8 --bch-t 7
 """
 
 from __future__ import annotations
@@ -269,7 +269,8 @@ def compute_model_stats(
         total = len(df)
         true_positive = int(df["successful_watermark"].sum())
         match_rate = true_positive / total if total > 0 else 0.0
-        detected = int((df["distance"] <= threshold).sum())
+        successful = df[df["successful_watermark"] == True]
+        detected = int((successful["distance"] <= threshold).sum())
         tpr = detected / total if total > 0 else 0.0
         rows.append({
             "model": model,
@@ -508,7 +509,7 @@ def create_histogram(
     fig.savefig(save_path, dpi=300, bbox_inches="tight")
     print(f"Histogram saved to: {save_path}")
 
-    if not args.no_show:
+    if args.show:
         plt.show()
 
     plt.close(fig)
@@ -529,7 +530,7 @@ def main():
     # Optional
     parser.add_argument("--codebook-generation", type=str, default="rng", choices=["rng", "bch"], help="Codeword generation algorithm (default: rng)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for negative generation (default: 42)")
-    parser.add_argument("--z", type=int, default=10000, help="Number of random negative samples (default: 10000)")
+    parser.add_argument("--z", type=int, required=True, help="Number of random negative samples")
     parser.add_argument("--fpr-target", type=float, default=0.01, help="Target FPR (default: 0.01)")
     parser.add_argument("--secret-key", type=str, default="25111915", help="Codebook secret key (default: 25111915)")
     parser.add_argument("--bch-t", type=int, default=None, help="BCH error-correction parameter t")
@@ -538,7 +539,7 @@ def main():
     parser.add_argument("--save-dir", type=str, default="output", help="Directory to save analysis outputs (default: output)")
     parser.add_argument("--include-models", type=str, nargs="+", default=None, help="Substring filter for model names")
     parser.add_argument("--verbose", action="store_true", help="Show detailed progress")
-    parser.add_argument("--no-show", action="store_true", help="Skip plt.show()")
+    parser.add_argument("--show", action="store_true", help="Display plots interactively")
 
     args = parser.parse_args()
 
