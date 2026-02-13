@@ -228,13 +228,13 @@ def evaluate_attack_robustness(
             else:
                 tp = 0
         else:
-            # Levenshtein: serial loop (variable-length codewords passed directly)
-            tp = 0
-            for cw in decoded_codewords:
-                attacked = attack_fn(cw, budget, rng)
-                _, _, dist = codebook.find_closest_match(attacked)
-                if dist <= threshold:
-                    tp += 1
+            # Levenshtein: batch Numba search (handles variable-length codewords)
+            attacked_list = [attack_fn(cw, budget, rng) for cw in decoded_codewords]
+            if attacked_list:
+                distances = codebook.find_closest_match_batch(attacked_list, distances_only=True)
+                tp = int((distances <= threshold).sum())
+            else:
+                tp = 0
 
         tpr = tp / total_samples if total_samples > 0 else 0.0
         results[budget] = tpr

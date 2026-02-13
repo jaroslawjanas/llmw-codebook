@@ -346,30 +346,6 @@ def main():
     
     processed_count = 0
 
-    # Potential improvement: batched queue consumption for Levenshtein search with RapidFuzz cdist (multi-core search)
-    # Rationale:
-    # - GPU generation runs in a separate process, so on the consumer side we may wake up to find that
-    #   several generations are already sitting in the results queue.
-    # - This becomes common later in the runtime as the queue builds up, provided the average GPU generation
-    #   time per prompt is lower than the CPU-side codebook search time.
-    # Current behavior:
-    # - We consume one item at a time via a blocking `results_queue.get()` and perform a single-query search
-    #   (e.g., Levenshtein via RapidFuzz `process.extractOne`).
-    # Proposed (not implemented here because current runtimes are sufficient for our experiments):
-    # - Keep the initial blocking `get()` to avoid busy-waiting, then immediately drain any additional
-    #   ready items using non-blocking `get_nowait()` to form a mini-batch of decoded codewords.
-    # - For the Levenshtein metric, transform each decoded codeword into a "0101..." string and run
-    #   `rapidfuzz.distance.Levenshtein.cdist(queries, codebook.codewords_str, workers=args.workers)`.
-    #   This computes a B×N distance matrix in parallel across CPU cores (B = batch size, N = codebook size);
-    #   the best match per query is the column with the minimum distance in its row.
-    # - Map the best-match indices back to watermark identities using the base codebook and record distances
-    #   exactly as in the per-item path to keep downstream logic unchanged.
-    # Notes:
-    # - Memory: cdist materializes a B×N matrix; sub-batch the queries if N is large or memory is constrained.
-    # - Encapsulation: if we want to keep `codewords_str` private, expose it via a small accessor on the codebook.
-    # - Trigger condition: the batching path is most beneficial when generation throughput exceeds CPU search throughput
-    #   (generation time &lt; search time), which tends to be more likely after the pipeline has warmed up.
-    
     while True:
         # Block until a result is available.
         # - Async mode: waits for IPC from the GPU worker process.

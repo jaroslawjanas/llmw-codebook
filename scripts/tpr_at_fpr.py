@@ -148,7 +148,7 @@ def _generate_negative_distances(codebook, z: int, u: int, seed: int, verbose: b
     """Generate z random bit sequences and find closest codebook match for each.
 
     For Hamming (Faiss), uses batch search for speed.
-    For Levenshtein (RapidFuzz), falls back to a serial loop.
+    For Levenshtein (Numba), uses batch search for speed.
     """
     rng = np.random.default_rng(seed)
 
@@ -163,16 +163,13 @@ def _generate_negative_distances(codebook, z: int, u: int, seed: int, verbose: b
         distances_arr, _ = codebook.index.search(queries, 1)
         return distances_arr[:, 0].astype(np.int32)
     else:
-        # Levenshtein: serial loop (RapidFuzz doesn't support batch)
-        distances = []
-        itr = range(z)
+        # Levenshtein: batch Numba search
         if verbose:
-            itr = tqdm(itr, desc="Generating negatives")
-        for _ in itr:
-            bits = rng.integers(0, 2, size=u, dtype=np.uint8)
-            _, _, dist = codebook.find_closest_match(bits)
-            distances.append(int(dist))
-        return np.array(distances, dtype=np.int32)
+            print(f"Generating {z} random bit sequences...")
+        random_bits = rng.integers(0, 2, size=(z, u), dtype=np.uint8)
+        if verbose:
+            print(f"Running batch Levenshtein search over {z} queries...")
+        return codebook.find_closest_match_batch(random_bits, distances_only=True).astype(np.int32)
 
 
 # ---------------------------------------------------------------------------
