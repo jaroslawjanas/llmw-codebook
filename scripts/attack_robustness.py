@@ -180,6 +180,7 @@ def adapt_for_hamming(attacked: np.ndarray, u: int) -> np.ndarray:
 
 def evaluate_attack_robustness(
     decoded_codewords: list[np.ndarray],
+    original_watermarks: np.ndarray,
     total_samples: int,
     codebook,
     attack_fn: Callable[[np.ndarray, int, np.random.Generator], np.ndarray],
@@ -194,6 +195,7 @@ def evaluate_attack_robustness(
 
     Args:
         decoded_codewords: Decoded codewords from successful watermark samples only.
+        original_watermarks: Original watermark identities for each decoded codeword.
         total_samples: Total number of samples (all rows) for TPR denominator.
         codebook: CodebookHamming or CodebookLevenshtein instance.
         attack_fn: Attack function to apply.
@@ -223,16 +225,19 @@ def evaluate_attack_robustness(
             if attacked_list:
                 attacked_matrix = np.stack(attacked_list)
                 queries = CodebookBase._pack_bits_2d(attacked_matrix, u)
-                distances, _ = codebook.index.search(queries, 1)
-                tp = int((distances[:, 0] <= threshold).sum())
+                distances, indices = codebook.index.search(queries, 1)
+                retrieved_watermarks = codebook.base.watermark_identities[indices[:, 0]]
+                correct_id = (retrieved_watermarks == original_watermarks)
+                tp = int((correct_id & (distances[:, 0] <= threshold)).sum())
             else:
                 tp = 0
         else:
             # Levenshtein: batch Numba search (handles variable-length codewords)
             attacked_list = [attack_fn(cw, budget, rng) for cw in decoded_codewords]
             if attacked_list:
-                distances = codebook.find_closest_match_batch(attacked_list, distances_only=True)
-                tp = int((distances <= threshold).sum())
+                _, retrieved_watermarks, distances = codebook.find_closest_match_batch(attacked_list)
+                correct_id = (retrieved_watermarks == original_watermarks)
+                tp = int((correct_id & (distances <= threshold)).sum())
             else:
                 tp = 0
 
@@ -449,11 +454,12 @@ def main() -> None:
         total_samples = len(df)
         successful = df[df["successful_watermark"] == True]
 
-        # Parse decoded codewords from successful samples
+        # Parse decoded codewords and original watermark identities from successful samples
         decoded_codewords = [
             np.array([int(b) for b in str(cw)], dtype=np.uint8)
             for cw in successful["decoded_codeword"].values
         ]
+        original_watermarks = successful["watermark"].values.astype(np.int64)
         print(f"  Loaded {len(decoded_codewords)} successful / {total_samples} total samples")
 
         attack_results: dict[str, dict[int, float]] = {}
@@ -464,6 +470,7 @@ def main() -> None:
         ]:
             attack_results[attack_name] = evaluate_attack_robustness(
                 decoded_codewords=decoded_codewords,
+                original_watermarks=original_watermarks,
                 total_samples=total_samples,
                 codebook=codebook,
                 attack_fn=attack_fn,
