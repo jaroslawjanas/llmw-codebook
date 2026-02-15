@@ -222,6 +222,7 @@ def evaluate_attack_robustness(
         np.array([int(b) for b in str(cw)], dtype=np.uint8)
         for cw in successful["decoded_codeword"].values
     ]
+    original_watermarks = successful["watermark"].values.astype(np.int64)
 
     for budget in tqdm(range(max_budget + 1), desc=f"  {attack_name}"):
         # Use seed + budget for reproducibility with different random selections per budget
@@ -229,15 +230,15 @@ def evaluate_attack_robustness(
 
         tp = 0
 
-        for decoded_codeword in decoded_codewords:
+        for i, decoded_codeword in enumerate(decoded_codewords):
             # Apply attack
             attacked_codeword = attack_fn(decoded_codeword, budget, rng)
 
             # BCH decode
-            _, bit_errors = bch_codec.decode(attacked_codeword)
+            recovered_watermark, bit_errors = bch_codec.decode_int(attacked_codeword)
 
-            # Check if within threshold
-            if bit_errors <= threshold:
+            # Check if correct identity AND within threshold
+            if recovered_watermark == original_watermarks[i] and bit_errors <= threshold:
                 tp += 1
 
         tpr = tp / total if total > 0 else 0.0
