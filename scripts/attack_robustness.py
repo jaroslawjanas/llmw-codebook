@@ -178,9 +178,15 @@ def adapt_for_hamming(attacked: np.ndarray, u: int) -> np.ndarray:
 # Core evaluation
 # ---------------------------------------------------------------------------
 
+def _bits_to_str(arr: np.ndarray) -> str:
+    """Convert a uint8 bit array to a bitstring like '01101'."""
+    return "".join(str(int(b)) for b in arr)
+
+
 def evaluate_attack_robustness(
     decoded_codewords: list[np.ndarray],
     original_watermarks: np.ndarray,
+    original_codewords: list[str],
     total_samples: int,
     codebook,
     attack_fn: Callable[[np.ndarray, int, np.random.Generator], np.ndarray],
@@ -189,13 +195,14 @@ def evaluate_attack_robustness(
     u: int,
     seed: int,
     attack_name: str,
-) -> dict[int, float]:
+) -> tuple[dict[int, float], list[dict]]:
     """
     Evaluate TPR at each specified budget level.
 
     Args:
         decoded_codewords: Decoded codewords from successful watermark samples only.
         original_watermarks: Original watermark identities for each decoded codeword.
+        original_codewords: Bitstrings of the original codebook codewords (pre-computed).
         total_samples: Total number of samples (all rows) for TPR denominator.
         codebook: CodebookHamming or CodebookLevenshtein instance.
         attack_fn: Attack function to apply.
@@ -206,10 +213,11 @@ def evaluate_attack_robustness(
         attack_name: Name for progress bar display.
 
     Returns:
-        Dict mapping budget -> TPR.
+        Tuple of (budget_to_tpr dict, per-sample detail rows).
     """
     is_hamming = isinstance(codebook, CodebookHamming)
     results = {}
+    detail_rows: list[dict] = []
 
     for budget in tqdm(budgets, desc=f"  {attack_name}"):
         rng = np.random.default_rng(seed + budget)
@@ -225,26 +233,57 @@ def evaluate_attack_robustness(
             if attacked_list:
                 attacked_matrix = np.stack(attacked_list)
                 queries = CodebookBase._pack_bits_2d(attacked_matrix, u)
-                distances, indices = codebook.index.search(queries, 1)
-                retrieved_watermarks = codebook.base.watermark_identities[indices[:, 0]]
-                correct_id = (retrieved_watermarks == original_watermarks)
-                tp = int((correct_id & (distances[:, 0] <= threshold)).sum())
+                distances_arr, indices = codebook.index.search(queries, 1)
+                retrieved_wm = codebook.base.watermark_identities[indices[:, 0]]
+                dist_flat = distances_arr[:, 0]
+                correct_id = (retrieved_wm == original_watermarks)
+                tp = int((correct_id & (dist_flat <= threshold)).sum())
+
+                for i in range(len(attacked_list)):
+                    rec_cw = codebook.base.get_codeword_by_index(int(retrieved_wm[i]))
+                    detail_rows.append({
+                        "sample_index": i,
+                        "budget": budget,
+                        "original_watermark": int(original_watermarks[i]),
+                        "original_codeword": original_codewords[i],
+                        "decoded_codeword": _bits_to_str(decoded_codewords[i]),
+                        "attacked_codeword": _bits_to_str(attacked_list[i]),
+                        "recovered_watermark": int(retrieved_wm[i]),
+                        "recovered_codeword": _bits_to_str(rec_cw),
+                        "distance": int(dist_flat[i]),
+                        "successful_watermark": bool(correct_id[i]),
+                    })
             else:
                 tp = 0
         else:
             # Levenshtein: batch Numba search (handles variable-length codewords)
             attacked_list = [attack_fn(cw, budget, rng) for cw in decoded_codewords]
             if attacked_list:
-                _, retrieved_watermarks, distances = codebook.find_closest_match_batch(attacked_list)
-                correct_id = (retrieved_watermarks == original_watermarks)
-                tp = int((correct_id & (distances <= threshold)).sum())
+                best_indices, retrieved_wm, dist_arr = codebook.find_closest_match_batch(attacked_list)
+                correct_id = (retrieved_wm == original_watermarks)
+                tp = int((correct_id & (dist_arr <= threshold)).sum())
+
+                for i in range(len(attacked_list)):
+                    rec_cw = codebook.base.get_codeword_by_index(int(best_indices[i]))
+                    detail_rows.append({
+                        "sample_index": i,
+                        "budget": budget,
+                        "original_watermark": int(original_watermarks[i]),
+                        "original_codeword": original_codewords[i],
+                        "decoded_codeword": _bits_to_str(decoded_codewords[i]),
+                        "attacked_codeword": _bits_to_str(attacked_list[i]),
+                        "recovered_watermark": int(retrieved_wm[i]),
+                        "recovered_codeword": _bits_to_str(rec_cw),
+                        "distance": int(dist_arr[i]),
+                        "successful_watermark": bool(correct_id[i]),
+                    })
             else:
                 tp = 0
 
         tpr = tp / total_samples if total_samples > 0 else 0.0
         results[budget] = tpr
 
-    return results
+    return results, detail_rows
 
 
 # ---------------------------------------------------------------------------
@@ -316,7 +355,7 @@ def write_results_txt(
     all_results: dict[str, dict[str, dict[int, float]]],
     save_path: str,
 ) -> None:
-    """Write formatted results to text file."""
+    """Write formatted results with one table per attack type."""
     lines = []
     lines.append("=" * 70)
     lines.append("Codebook Attack Robustness Analysis")
@@ -335,38 +374,31 @@ def write_results_txt(
     lines.append(f"  seed: {args.seed}")
     lines.append("")
 
-    for model, attack_results in all_results.items():
-        lines.append("-" * 70)
-        lines.append(f"Model: {model}")
-        lines.append("-" * 70)
-        for attack_name, results in attack_results.items():
-            baseline = results[0]
-            final = results[args.max_budget]
-            lines.append(f"  {attack_name}:")
-            lines.append(f"    TPR baseline (budget=0): {baseline:.4f} ({baseline * 100:.2f}%)")
-            lines.append(f"    TPR final (budget={args.max_budget}): {final:.4f} ({final * 100:.2f}%)")
-            # 50% degradation point
-            if baseline > 0:
-                for budget, tpr in results.items():
-                    if tpr < baseline * 0.5:
-                        lines.append(f"    50% TPR degradation at budget: {budget}")
-                        break
-        lines.append("")
+    # Collect model short names and attack names
+    models = list(all_results.keys())
+    short_names = [shorten_model_name(m) for m in models]
+    model_col_width = max(len(s) for s in short_names) + 2
+    budget_col_width = 7  # enough for "100.00"
 
-    # Summary table
-    lines.append("=" * 70)
-    lines.append("Summary Table")
-    lines.append("=" * 70)
-    header = f"{'Model':<40} {'Attack':<15} {'TPR base':>10} {'TPR final':>10}"
-    lines.append(header)
-    lines.append("-" * 75)
-    for model, attack_results in all_results.items():
-        short = shorten_model_name(model)
-        for attack_name, results in attack_results.items():
-            lines.append(
-                f"{short:<40} {attack_name:<15} "
-                f"{results[0]:>10.2%} {results[args.max_budget]:>10.2%}"
-            )
+    # Get attack names from first model
+    attack_names = list(next(iter(all_results.values())).keys())
+    budgets = args.budgets
+
+    for attack_name in attack_names:
+        lines.append(f"TPR (%) @ FPR={actual_fpr * 100:.2f}% — {attack_name}")
+        # Header row: model column + budget columns
+        header = " " * model_col_width
+        header += "".join(f"{b:>{budget_col_width}}" for b in budgets)
+        lines.append(header)
+        lines.append("-" * len(header))
+
+        for model, short in zip(models, short_names):
+            results = all_results[model][attack_name]
+            row = f"{short:<{model_col_width}}"
+            row += "".join(f"{results[b] * 100:>{budget_col_width}.2f}" for b in budgets)
+            lines.append(row)
+
+        lines.append("")
 
     text = "\n".join(lines)
     print(text)
@@ -374,22 +406,20 @@ def write_results_txt(
         f.write(text)
 
 
-def write_results_csv(
-    all_results: dict[str, dict[str, dict[int, float]]],
+def write_model_detail_csv(
+    detail_rows: list[dict],
     save_path: str,
 ) -> None:
-    """Write per-budget TPR values as CSV for downstream analysis."""
-    rows = []
-    for model, attack_results in all_results.items():
-        for attack_name, results in attack_results.items():
-            for budget, tpr in results.items():
-                rows.append({
-                    "model": model,
-                    "attack": attack_name,
-                    "budget": budget,
-                    "tpr": tpr,
-                })
-    pd.DataFrame(rows).to_csv(save_path, index=False)
+    """Write per-sample attack detail rows as CSV for offline re-analysis."""
+    pd.DataFrame(detail_rows).to_csv(save_path, index=False)
+
+
+def write_metadata_csv(
+    model_metadata: list[dict],
+    save_path: str,
+) -> None:
+    """Write per-model metadata CSV with sample counts and FPR info."""
+    pd.DataFrame(model_metadata).to_csv(save_path, index=False)
 
 
 # ---------------------------------------------------------------------------
@@ -447,6 +477,7 @@ def main() -> None:
 
     # Step 4: Run attacks per model
     all_results: dict[str, dict[str, dict[int, float]]] = {}
+    model_metadata: list[dict] = []
 
     for model, df in sorted(model_to_df.items()):
         print(f"\nProcessing {shorten_model_name(model)}...")
@@ -454,23 +485,40 @@ def main() -> None:
         total_samples = len(df)
         successful = df[df["successful_watermark"] == True]
 
+        model_metadata.append({
+            "model": model,
+            "total_samples": total_samples,
+            "successful_samples": len(successful),
+            "fpr_threshold": threshold,
+            "fpr_percentage": actual_fpr * 100,
+        })
+
         # Parse decoded codewords and original watermark identities from successful samples
         decoded_codewords = [
             np.array([int(b) for b in str(cw)], dtype=np.uint8)
             for cw in successful["decoded_codeword"].values
         ]
         original_watermarks = successful["watermark"].values.astype(np.int64)
+
+        # Pre-compute original codebook codewords as bitstrings
+        original_codewords = [
+            _bits_to_str(codebook.base.get_codeword_by_index(int(wm)))
+            for wm in original_watermarks
+        ]
+
         print(f"  Loaded {len(decoded_codewords)} successful / {total_samples} total samples")
 
         attack_results: dict[str, dict[int, float]] = {}
+        model_detail_rows: list[dict] = []
         for attack_name, attack_fn in [
             ("Substitution", apply_substitution_attack),
             ("Insertion", apply_insertion_attack),
             ("Deletion", apply_deletion_attack),
         ]:
-            attack_results[attack_name] = evaluate_attack_robustness(
+            tpr_dict, detail_rows = evaluate_attack_robustness(
                 decoded_codewords=decoded_codewords,
                 original_watermarks=original_watermarks,
+                original_codewords=original_codewords,
                 total_samples=total_samples,
                 codebook=codebook,
                 attack_fn=attack_fn,
@@ -480,11 +528,20 @@ def main() -> None:
                 seed=args.seed,
                 attack_name=attack_name,
             )
+            attack_results[attack_name] = tpr_dict
+            for row in detail_rows:
+                row["attack"] = attack_name
+            model_detail_rows.extend(detail_rows)
 
         all_results[model] = attack_results
 
-        # Per-model plot
+        # Per-model detail CSV
         safe_model = sanitize_filename(model)
+        csv_path = os.path.join(run_save_dir, f"{safe_model}_details.csv")
+        write_model_detail_csv(model_detail_rows, csv_path)
+        print(f"  Saved detail CSV: {csv_path}")
+
+        # Per-model plot
         plot_path = os.path.join(run_save_dir, f"{safe_model}_robustness.png")
         create_model_plot(model, attack_results, actual_fpr, args, plot_path)
         print(f"  Saved plot: {plot_path}")
@@ -493,8 +550,8 @@ def main() -> None:
     results_path = os.path.join(run_save_dir, "results.txt")
     write_results_txt(args, threshold, actual_fpr, all_results, results_path)
 
-    csv_path = os.path.join(run_save_dir, "results.csv")
-    write_results_csv(all_results, csv_path)
+    metadata_path = os.path.join(run_save_dir, "metadata.csv")
+    write_metadata_csv(model_metadata, metadata_path)
 
     print(f"\nOutputs saved to: {run_save_dir}")
 
