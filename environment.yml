@@ -19,6 +19,7 @@ dependencies:
   - seaborn>=0.13
   - numba>=0.61
   - rapidfuzz=3.14.3
+  - c-compiler  # Needed by Triton to build CUDA utilities
   - pip
   - pip:
     - accelerate==1.7.0
@@ -26,5 +27,6 @@ dependencies:
     - protobuf==6.32.0
     - faiss-cpu>=1.12.0
     - galois==0.4.6
+    # Triton (--distance levenshtein-triton): uncomment ONE line for your platform
     - triton-windows>=3.0.0  # Windows
-    # - triton>=3.0.0  # Linux
+    # - triton>=3.0.0  # Linux (if libcuda.so missing: ln -s libcuda.so.1 libcuda.so)Sta
