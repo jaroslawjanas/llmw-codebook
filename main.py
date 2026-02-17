@@ -98,6 +98,7 @@ def main():
     # Useful for debugging and environments where multiprocessing is problematic or when you want deterministic,
     # step-by-step execution without producer/consumer overlap.
     parser.add_argument("--synch", action="store_true", help="Run synchronously in a single process (disable GPU worker and queue)")
+    parser.add_argument("--num-gpus", type=int, default=0, help="Number of GPUs for parallel generation (0 = all available, default: 0)")
 
     args = parser.parse_args()
 
@@ -112,17 +113,27 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
 
-    # Determine device
+    # Determine device and number of GPUs
     if args.no_cuda:
         device = "cpu"
+        num_gpus = 0
         print(f"Device: {device} (CUDA disabled by --no-cuda flag)\n")
     else:
         device = "cuda" if torch.cuda.is_available() else "cpu"
         if device == "cuda":
-            print(f"Device: {device} (CUDA available and enabled)\n")
+            available_gpus = torch.cuda.device_count()
+            if args.num_gpus == 0:
+                num_gpus = available_gpus
+            else:
+                if args.num_gpus > available_gpus:
+                    print(f"Warning: --num-gpus {args.num_gpus} exceeds available GPUs ({available_gpus}), using {available_gpus}")
+                num_gpus = min(args.num_gpus, available_gpus)
+            gpu_names = [torch.cuda.get_device_name(i) for i in range(num_gpus)]
+            print(f"Device: {device} ({num_gpus} GPU{'s' if num_gpus > 1 else ''}: {', '.join(gpu_names)})\n")
         else:
+            num_gpus = 0
             print(f"Device: {device} (CUDA not available, falling back to CPU)\n")
-    
+
     print(f"Using secret key: {args.secret_key}\n")
 
     # Determine effective max tokens: default to u when not provided, and ensure multiple of u
@@ -214,6 +225,7 @@ def main():
         "experiment": {
             "timestamp": timestamp,
             "device": device,
+            "num_gpus": num_gpus,
         },
     }
     with open(os.path.join(output_dir, "config.json"), "w", encoding="utf-8") as f:
@@ -309,12 +321,13 @@ def main():
         print(f"\nPrepared {len(batch_items)} prompts for generation queue")
 
     #----------------------------------------#
-    #   Start Generation Worker              #
+    #   Start Generation Workers             #
     #----------------------------------------#
-    
+
     results_queue = Queue()
-    # Unified interface: both modes push results into the same Queue; the consumer loop below is identical.
-    gpu_process = None
+    gpu_processes = []
+    num_active_workers = 0
+
     if args.synch:
         if args.verbose:
             print("Running generation worker synchronously (--synch)")
@@ -324,15 +337,36 @@ def main():
             results_queue=results_queue,
             effective_max_tokens=effective_max_tokens
         )
-    else:
-        gpu_process = Process(
+        num_active_workers = 1  # synch mode sends one sentinel
+    elif num_gpus <= 1:
+        # Single GPU worker (original behavior)
+        p = Process(
             target=gpu_generation_worker,
             args=(watermarker_config, batch_items, results_queue, effective_max_tokens),
-            daemon=True
+            daemon=True,
         )
-        gpu_process.start()
+        p.start()
+        gpu_processes.append(p)
+        num_active_workers = 1
         if args.verbose:
             print("GPU generation worker process started")
+    else:
+        # Multi-GPU: round-robin distribute prompts across workers
+        for gpu_id in range(num_gpus):
+            worker_items = [item for i, item in enumerate(batch_items) if i % num_gpus == gpu_id]
+            if not worker_items:
+                continue
+            worker_config = {**watermarker_config, 'device': f'cuda:{gpu_id}'}
+            p = Process(
+                target=gpu_generation_worker,
+                args=(worker_config, worker_items, results_queue, effective_max_tokens),
+                daemon=True,
+            )
+            p.start()
+            gpu_processes.append(p)
+            num_active_workers += 1
+        if args.verbose:
+            print(f"Started {num_active_workers} GPU generation workers across {num_gpus} GPUs")
 
     #----------------------------------------#
     #    Consumer Loop (Main Thread)         #
@@ -347,19 +381,20 @@ def main():
     )
     
     processed_count = 0
+    sentinels_received = 0
 
     while True:
-        # Block until a result is available.
-        # - Async mode: waits for IPC from the GPU worker process.
-        # - --synch mode: waits for items pushed by the inline worker; overlap is disabled so this is typically short.
         wait_start = time.time()
         item = results_queue.get()
         wait_time = time.time() - wait_start
         queue_wait_times.append(wait_time)
-        
-        # Sentinel: None signals all generations are complete
+
+        # Sentinel: each worker sends None when done
         if item is None:
-            break
+            sentinels_received += 1
+            if sentinels_received >= num_active_workers:
+                break
+            continue
         
         # Handle generation errors
         if not item['success']:
@@ -455,11 +490,9 @@ def main():
         processed_count += 1
     
     processing_progress.close()
-    
-    # Wait for worker process to finish (only applicable in async mode).
-    # Guarded join keeps linters happy and avoids referencing an unbound variable in --synch runs.
-    if gpu_process is not None:
-        gpu_process.join()
+
+    for p in gpu_processes:
+        p.join()
 
     #----------------------------------------#
     #           Results Summary              #
