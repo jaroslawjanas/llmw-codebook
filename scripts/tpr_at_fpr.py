@@ -43,6 +43,7 @@ from src.codebooks import (
     CodebookBase,
     CodebookHamming,
     CodebookLevenshtein,
+    CodebookLevenshteinTriton,
     RNGCodewordGenerator,
 )
 
@@ -522,7 +523,7 @@ def main():
     # Required
     parser.add_argument("--n", type=int, required=True, help="Codebook size parameter (2^n entries)")
     parser.add_argument("--u", type=int, required=True, help="Code length in bits")
-    parser.add_argument("--distance", type=str, required=True, choices=["hamming", "levenshtein"], help="Distance metric")
+    parser.add_argument("--distance", type=str, required=True, choices=["hamming", "levenshtein", "levenshtein-triton"], help="Distance metric")
 
     # Optional
     parser.add_argument("--codebook-generation", type=str, default="rng", choices=["rng", "bch"], help="Codeword generation algorithm (default: rng)")
@@ -560,6 +561,8 @@ def main():
     )
     if args.distance == "hamming":
         codebook = CodebookHamming(base_codebook)
+    elif args.distance == "levenshtein-triton":
+        codebook = CodebookLevenshteinTriton(base_codebook)
     else:
         codebook = CodebookLevenshtein(base_codebook)
 

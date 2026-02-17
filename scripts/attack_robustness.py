@@ -49,6 +49,7 @@ from src.codebooks import (
     CodebookBase,
     CodebookHamming,
     CodebookLevenshtein,
+    CodebookLevenshteinTriton,
     RNGCodewordGenerator,
 )
 
@@ -64,7 +65,7 @@ def parse_args() -> argparse.Namespace:
     # Required
     parser.add_argument("--n", type=int, required=True, help="Codebook size parameter (2^n entries)")
     parser.add_argument("--u", type=int, required=True, help="Code length in bits")
-    parser.add_argument("--distance", type=str, required=True, choices=["hamming", "levenshtein"], help="Distance metric")
+    parser.add_argument("--distance", type=str, required=True, choices=["hamming", "levenshtein", "levenshtein-triton"], help="Distance metric")
     parser.add_argument("--z", type=int, required=True, help="Number of random negative samples for FPR threshold")
 
     # Attack parameters
@@ -447,6 +448,8 @@ def main() -> None:
     )
     if args.distance == "hamming":
         codebook = CodebookHamming(base_codebook)
+    elif args.distance == "levenshtein-triton":
+        codebook = CodebookLevenshteinTriton(base_codebook)
     else:
         codebook = CodebookLevenshtein(base_codebook)
 

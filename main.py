@@ -11,7 +11,7 @@ from multiprocessing import Process, Queue
 import src.paths as paths
 from src.utils import get_shuffled_essays
 from src.llm_watermark import LLMWatermarkEncoder, LLMWatermarkDecoder
-from src.codebooks import CodebookBase, CodebookHamming, CodebookLevenshtein, RNGCodewordGenerator, BCHCodewordGenerator
+from src.codebooks import CodebookBase, CodebookHamming, CodebookLevenshtein, CodebookLevenshteinTriton, RNGCodewordGenerator, BCHCodewordGenerator
 from tqdm import tqdm
 
 
@@ -77,7 +77,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--secret-key", type=str, default="25111915", help="Secret key used for watermarking and codebook generation (string)")
     parser.add_argument("--codeword-generation", type=str, choices=["rng", "bch"], default="rng", help="Codeword generation strategy for base codebook: 'rng' (random baseline) or 'bch' (BCH-based)")
-    parser.add_argument("--distance", type=str, choices=["hamming", "levenshtein"], default="hamming", help="Distance metric for codebook search")
+    parser.add_argument("--distance", type=str, choices=["hamming", "levenshtein", "levenshtein-triton"], default="hamming", help="Distance metric for codebook search")
     parser.add_argument("--bch-t", type=int, default=None, help="BCH designed error-correction parameter t (if None, auto-choose the largest t with k >= n)")
     parser.add_argument("--bch-m", type=int, default=None, help="BCH field degree m (n0=2^m-1). If None, minimal m with n0 >= u is chosen")
     parser.add_argument("--prompt", type=str, help="Custom prompt (uses random essay from dataset if not provided)")
@@ -269,6 +269,8 @@ def main():
     )
     if args.distance == "hamming":
         codebook = CodebookHamming(base_codebook)
+    elif args.distance == "levenshtein-triton":
+        codebook = CodebookLevenshteinTriton(base_codebook)
     else:
         codebook = CodebookLevenshtein(base_codebook)
 

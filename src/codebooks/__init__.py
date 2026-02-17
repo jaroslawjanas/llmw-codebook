@@ -10,12 +10,14 @@ Exports:
 from .base import CodebookBase
 from .hamming import CodebookHamming
 from .levenshtein import CodebookLevenshtein
+from .levenshtein_triton import CodebookLevenshteinTriton
 from .generation import CodewordGenerator, RNGCodewordGenerator, BCHCodewordGenerator
 
 __all__ = [
     "CodebookBase",
     "CodebookHamming",
     "CodebookLevenshtein",
+    "CodebookLevenshteinTriton",
     "CodewordGenerator",
     "RNGCodewordGenerator",
     "BCHCodewordGenerator",
