@@ -65,6 +65,7 @@ def shorten_model_name(name: str) -> str:
 def _build_cache_basename(args: argparse.Namespace) -> str:
     """Build a deterministic cache filename base from params (no extension)."""
     sk_clean = sanitize_filename(args.secret_key)
+    distance = args.distance.replace("-triton", "")
     parts = [
         "fpr_negatives",
         args.codebook_generation,
@@ -73,7 +74,7 @@ def _build_cache_basename(args: argparse.Namespace) -> str:
         f"z{args.z}",
         f"seed{args.seed}",
         f"sk-{sk_clean}",
-        args.distance,
+        distance,
     ]
     if args.codebook_generation == "bch":
         t_tag = "auto" if args.bch_t is None else str(args.bch_t)
@@ -220,10 +221,12 @@ def load_positive_data(
     if exps.empty:
         return {}
 
+    # levenshtein-triton is the same metric as levenshtein (just a faster backend)
+    distance_filter = args.distance.replace("-triton", "")
     mask = (
         (exps["n"] == args.n)
         & (exps["u"] == args.u)
-        & (exps["distance"] == args.distance)
+        & (exps["distance"] == distance_filter)
         & (exps["codeword_generation"] == args.codebook_generation)
     )
     filtered = exps[mask]
