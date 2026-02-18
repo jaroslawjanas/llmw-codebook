@@ -48,6 +48,10 @@ __all__ = ["CodebookLevenshteinTriton"]
 def _convert_uint8_be_to_int64_le(packed_uint8: np.ndarray, u: int) -> np.ndarray:
     """Convert codebook from uint8 big-endian packed to int64 LE-packed.
 
+    Processes in row-chunks to cap working memory at ~64 MB regardless of
+    codebook size (the previous all-at-once approach created a temporary
+    (N, num_words, 64) uint64 array — 32+ GB for n=24 u=256).
+
     Args:
         packed_uint8: (N, ceil(u/8)) uint8 array from CodebookBase.
         u: codeword length in bits.
@@ -57,21 +61,29 @@ def _convert_uint8_be_to_int64_le(packed_uint8: np.ndarray, u: int) -> np.ndarra
     """
     N = packed_uint8.shape[0]
     num_words = (u + 63) // 64
+    result = np.empty((N, num_words), dtype=np.int64)
 
-    # Unpack all bits: (N, u) uint8 {0,1}
-    all_bits = np.unpackbits(packed_uint8, axis=1, bitorder="big")[:, :u]
+    # Cap intermediate memory at ~64 MB: each row expands to (num_words, 64) uint64
+    row_bytes = num_words * 64 * 8  # bytes per row in the uint64 intermediate
+    chunk_rows = max(1, (64 * 1024 * 1024) // row_bytes)
 
-    # Pad to multiple of 64 and reshape to (N, num_words, 64)
-    padded = np.zeros((N, num_words * 64), dtype=np.uint8)
-    padded[:, :u] = all_bits
-    padded = padded.reshape(N, num_words, 64)
-
-    # LE pack: bit k in each 64-bit group has weight 2^k
+    # LE bit weights — computed once, reused across chunks
     powers = np.uint64(1) << np.arange(64, dtype=np.uint64)  # (64,)
-    result = (padded.astype(np.uint64) * powers).sum(axis=2)  # (N, num_words)
 
-    # Reinterpret as int64 (same bit pattern) for PyTorch compatibility
-    return result.view(np.int64)
+    for start in range(0, N, chunk_rows):
+        end = min(start + chunk_rows, N)
+        chunk = packed_uint8[start:end]
+
+        all_bits = np.unpackbits(chunk, axis=1, bitorder="big")[:, :u]
+
+        chunk_n = end - start
+        padded = np.zeros((chunk_n, num_words * 64), dtype=np.uint8)
+        padded[:, :u] = all_bits
+        padded = padded.reshape(chunk_n, num_words, 64)
+
+        result[start:end] = (padded.astype(np.uint64) * powers).sum(axis=2).view(np.int64)
+
+    return result
 
 
 def _pack_query_to_int64(bits: np.ndarray, length: int) -> np.ndarray:
@@ -398,6 +410,144 @@ def _myers_lev_kernel_3block(
 
 
 # ---------------------------------------------------------------------------
+# Generalized kernel (NUM_BLOCKS >= 4, buffer-based state)
+# ---------------------------------------------------------------------------
+# For u > 192, the number of 64-bit blocks exceeds the hand-unrolled kernels
+# above. This kernel handles any NUM_BLOCKS by storing Pv/Mv state in
+# pre-allocated GPU memory buffers instead of register variables.
+#
+# The inner block loop uses tl.static_range(NUM_BLOCKS) so the compiler
+# unrolls it at compile time — all `b == 0` / `b == NUM_BLOCKS - 1` checks
+# become compile-time constants with no runtime branching.
+# ---------------------------------------------------------------------------
+
+@triton.jit
+def _myers_lev_kernel_general(
+    # Pointers
+    codebook_ptr,       # (chunk_N, num_cb_words) int64 — codebook packed
+    query_ptr,          # (NUM_BLOCKS,) int64 — query words on device
+    pv_ptr,             # (NUM_BLOCKS * chunk_N,) int64 — Pv state buffer, row-major
+    mv_ptr,             # (NUM_BLOCKS * chunk_N,) int64 — Mv state buffer, row-major
+    result_ptr,         # (chunk_N,) int32 — output distances
+    # Dimensions
+    N: tl.int32,        # chunk_N (number of codebook entries in this chunk)
+    text_len: tl.int32, # code length (u)
+    num_cb_words: tl.int32,  # stride: words per codebook row
+    last_mask: tl.int64,
+    high_bit: tl.int64,
+    query_len: tl.int32,
+    # Grid
+    BLOCK_SIZE: tl.constexpr,
+    NUM_BLOCKS: tl.constexpr,
+):
+    """Myers' kernel for arbitrary NUM_BLOCKS (query_len up to NUM_BLOCKS*64).
+
+    Uses global memory buffers for Pv/Mv state with coalesced access pattern:
+    buffer layout is (NUM_BLOCKS, N) row-major, so block b's state for entry
+    offset `offs` is at ptr + b * N + offs.
+    """
+    pid = tl.program_id(0)
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offs < N
+
+    ALL_ONES: tl.constexpr = -1  # 0xFFFFFFFFFFFFFFFF as int64
+
+    score_vec = tl.full([BLOCK_SIZE], query_len, dtype=tl.int32)
+
+    # Process each text position
+    for i in range(text_len):
+        word_idx = i // 64
+        bit_pos = i % 64
+
+        # Load text bit for each entry
+        cb_offs = offs * num_cb_words + word_idx
+        text_word = tl.load(codebook_ptr + cb_offs, mask=mask, other=0).to(tl.int64)
+        text_bit = (text_word >> bit_pos) & 1
+
+        # Carry and MSB propagation across blocks
+        carry: tl.int64 = 0
+        prev_ph_msb: tl.int64 = 0
+        prev_mh_msb: tl.int64 = 0
+
+        for b in tl.static_range(NUM_BLOCKS):
+            # Load query word for this block
+            q_word = tl.load(query_ptr + b).to(tl.int64)
+
+            # Build Eq: mask last block to valid bits only
+            if b == NUM_BLOCKS - 1:
+                q_masked = q_word & last_mask
+                nq_masked = (~q_word) & last_mask
+                Eq = tl.where(text_bit == 1, q_masked, nq_masked)
+            else:
+                Eq = tl.where(text_bit == 1, q_word, ~q_word)
+
+            # Load Pv, Mv for this block (coalesced: adjacent offs are adjacent)
+            state_offs = b * N + offs
+            Pv = tl.load(pv_ptr + state_offs, mask=mask, other=0).to(tl.int64)
+            Mv = tl.load(mv_ptr + state_offs, mask=mask, other=0).to(tl.int64)
+
+            Xv = Eq | Mv
+
+            # Addition with carry propagation
+            a = Eq & Pv
+            if b == 0:
+                # First block: no carry-in
+                sum_val = a + Pv
+                new_carry = (((a & Pv) | ((a | Pv) & (~sum_val))) >> 63) & 1
+            else:
+                # Subsequent blocks: two-step carry (overflow check)
+                sum_nc = a + Pv
+                carry_add = (((a & Pv) | ((a | Pv) & (~sum_nc))) >> 63) & 1
+                sum_val = sum_nc + carry
+                carry_ovf = carry & (sum_nc == ALL_ONES).to(tl.int64)
+                new_carry = carry_add | carry_ovf
+
+            carry = new_carry
+
+            Xh = (sum_val ^ Pv) | Eq
+            Ph = Mv | (~(Xh | Pv))
+            Mh = Pv & Xh
+
+            # Last block: mask and update score
+            if b == NUM_BLOCKS - 1:
+                Ph = Ph & last_mask
+                Mh = Mh & last_mask
+                ph_high = (Ph & high_bit) != 0
+                mh_high = (Mh & high_bit) != 0
+                score_vec = score_vec + ph_high.to(tl.int32) - mh_high.to(tl.int32)
+
+            # Extract MSBs before shifting
+            ph_msb = (Ph >> 63) & 1
+            mh_msb = (Mh >> 63) & 1
+
+            # Shift Ph, Mh left by 1
+            if b == 0:
+                Ph_shifted = (Ph << 1) | 1  # boundary condition: set bit 0
+                Mh_shifted = Mh << 1
+            else:
+                Ph_shifted = (Ph << 1) | prev_ph_msb
+                Mh_shifted = (Mh << 1) | prev_mh_msb
+
+            prev_ph_msb = ph_msb
+            prev_mh_msb = mh_msb
+
+            # Update Pv, Mv
+            new_Pv = Mh_shifted | (~(Xv | Ph_shifted))
+            new_Mv = Ph_shifted & Xv
+
+            if b == NUM_BLOCKS - 1:
+                new_Pv = new_Pv & last_mask
+                new_Mv = new_Mv & last_mask
+
+            # Store updated state back to buffer
+            tl.store(pv_ptr + state_offs, new_Pv, mask=mask)
+            tl.store(mv_ptr + state_offs, new_Mv, mask=mask)
+
+    # Store results
+    tl.store(result_ptr + offs, score_vec, mask=mask)
+
+
+# ---------------------------------------------------------------------------
 # Host-side search function
 # ---------------------------------------------------------------------------
 
@@ -443,11 +593,19 @@ def _myers_search_triton(
 
     BLOCK_SIZE = 256  # entries per Triton program instance
 
+    # For the general kernel (num_blocks >= 4), cap Pv/Mv buffer memory at ~128 MB
+    if num_blocks > 3:
+        max_buffer_bytes = 128 * 1024 * 1024
+        adaptive_chunk = max_buffer_bytes // (2 * num_blocks * 8)
+        effective_chunk = min(chunk_size, max(65536, adaptive_chunk))
+    else:
+        effective_chunk = chunk_size
+
     best_idx = 0
     best_dist = m + n + 1
 
-    for chunk_start in range(0, N, chunk_size):
-        chunk_end = min(chunk_start + chunk_size, N)
+    for chunk_start in range(0, N, effective_chunk):
+        chunk_end = min(chunk_start + effective_chunk, N)
         chunk_N = chunk_end - chunk_start
 
         # Result buffer for this chunk
@@ -500,10 +658,33 @@ def _myers_search_triton(
                 BLOCK_SIZE=BLOCK_SIZE,
             )
         else:
-            raise NotImplementedError(
-                f"Triton Levenshtein kernel supports up to 192-bit queries "
-                f"(3 blocks), got {num_blocks} blocks for query_len={m}"
+            # General kernel: allocate Pv/Mv state buffers on GPU
+            # Layout: (NUM_BLOCKS, chunk_N) row-major for coalesced access
+            Pv_buf = torch.full(
+                (num_blocks, chunk_N), -1, dtype=torch.int64, device=device
             )
+            Pv_buf[-1, :] = last_mask  # last block: only valid bits
+            Mv_buf = torch.zeros(
+                (num_blocks, chunk_N), dtype=torch.int64, device=device
+            )
+
+            _myers_lev_kernel_general[grid](
+                cb_chunk_ptr,
+                query_packed,       # (num_blocks,) int64 on device
+                Pv_buf,
+                Mv_buf,
+                result,
+                chunk_N,
+                n,
+                num_cb_words,
+                last_mask,
+                high_bit,
+                m,
+                BLOCK_SIZE=BLOCK_SIZE,
+                NUM_BLOCKS=num_blocks,
+            )
+
+            del Pv_buf, Mv_buf
 
         # Find min in this chunk
         chunk_min_val, chunk_min_local_idx = result.min(dim=0)
