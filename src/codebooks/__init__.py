@@ -11,7 +11,7 @@ from .base import CodebookBase
 from .hamming import CodebookHamming
 from .levenshtein import CodebookLevenshtein
 from .levenshtein_triton import CodebookLevenshteinTriton
-from .generation import CodewordGenerator, RNGCodewordGenerator, BCHCodewordGenerator
+from .generation import CodewordGenerator, RNGCodewordGenerator, BCHCodewordGenerator, LinearCodeGenerator
 
 __all__ = [
     "CodebookBase",
@@ -21,4 +21,5 @@ __all__ = [
     "CodewordGenerator",
     "RNGCodewordGenerator",
     "BCHCodewordGenerator",
+    "LinearCodeGenerator",
 ]

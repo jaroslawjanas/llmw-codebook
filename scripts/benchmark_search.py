@@ -34,6 +34,7 @@ from src.codebooks import (
     CodebookHamming,
     CodebookLevenshtein,
     CodebookLevenshteinTriton,
+    LinearCodeGenerator,
     RNGCodewordGenerator,
 )
 
@@ -46,7 +47,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n", type=int, required=True, help="Codebook size parameter (2^n entries)")
     parser.add_argument("--u", type=int, required=True, help="Code length in bits")
     parser.add_argument("--distance", type=str, required=True, choices=["hamming", "levenshtein", "levenshtein-triton"], help="Distance metric")
-    parser.add_argument("--codebook-generation", type=str, default="rng", choices=["rng", "bch"], help="Codeword generation algorithm (default: rng)")
+    parser.add_argument("--codebook-generation", type=str, default="rng", choices=["rng", "bch", "linear"], help="Codeword generation algorithm (default: rng)")
     parser.add_argument("--secret-key", type=str, default="25111915", help="Codebook secret key (default: 25111915)")
     parser.add_argument("--bch-t", type=int, default=None, help="BCH error-correction parameter t")
     parser.add_argument("--bch-m", type=int, default=None, help="BCH field degree m")
@@ -185,6 +186,9 @@ def main() -> None:
     if args.codebook_generation == "rng":
         generator_cls = RNGCodewordGenerator
         generator_kwargs: dict = {}
+    elif args.codebook_generation == "linear":
+        generator_cls = LinearCodeGenerator
+        generator_kwargs = {}
     else:
         generator_cls = BCHCodewordGenerator
         generator_kwargs = {"t": args.bch_t, "m": args.bch_m}

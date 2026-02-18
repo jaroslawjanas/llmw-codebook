@@ -29,7 +29,7 @@ def discover_experiments(output_dir: Path | str = None) -> pd.DataFrame:
           - n: int (watermark bits)
           - u: int (codeword length)
           - distance: str ('hamming' or 'levenshtein')
-          - codeword_generation: str ('rng' or 'bch')
+          - codeword_generation: str ('rng', 'bch', or 'linear')
           - timestamp: str (e.g., '20260201_002241')
           - path: Path (full path to experiment directory)
     """

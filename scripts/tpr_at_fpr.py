@@ -44,6 +44,7 @@ from src.codebooks import (
     CodebookHamming,
     CodebookLevenshtein,
     CodebookLevenshteinTriton,
+    LinearCodeGenerator,
     RNGCodewordGenerator,
 )
 
@@ -529,7 +530,7 @@ def main():
     parser.add_argument("--distance", type=str, required=True, choices=["hamming", "levenshtein", "levenshtein-triton"], help="Distance metric")
 
     # Optional
-    parser.add_argument("--codebook-generation", type=str, default="rng", choices=["rng", "bch"], help="Codeword generation algorithm (default: rng)")
+    parser.add_argument("--codebook-generation", type=str, default="rng", choices=["rng", "bch", "linear"], help="Codeword generation algorithm (default: rng)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for negative generation (default: 42)")
     parser.add_argument("--z", type=int, required=True, help="Number of random negative samples")
     parser.add_argument("--fpr-target", type=float, default=0.01, help="Target FPR (default: 0.01)")
@@ -551,6 +552,9 @@ def main():
     if args.codebook_generation == "rng":
         generator_cls = RNGCodewordGenerator
         generator_kwargs: dict = {}
+    elif args.codebook_generation == "linear":
+        generator_cls = LinearCodeGenerator
+        generator_kwargs = {}
     else:
         generator_cls = BCHCodewordGenerator
         generator_kwargs = {"t": args.bch_t, "m": args.bch_m}

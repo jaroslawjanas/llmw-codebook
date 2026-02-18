@@ -29,6 +29,7 @@ __all__ = [
     "CodewordGenerator",
     "RNGCodewordGenerator",
     "BCHCodewordGenerator",
+    "LinearCodeGenerator",
 ]
 
 
@@ -42,6 +43,13 @@ def _int_to_bits(value: int, length: int) -> np.ndarray:
     for idx in range(length):
         bits[idx] = (value >> (length - 1 - idx)) & 1
     return bits
+
+
+def _build_message_matrix(start: int, end: int, n: int) -> np.ndarray:
+    """Build (end-start, n) matrix where row i is the n-bit binary representation of (start+i)."""
+    identities = np.arange(start, end, dtype=np.uint32)
+    bit_positions = np.arange(n - 1, -1, -1, dtype=np.uint32)
+    return ((identities[:, np.newaxis] >> bit_positions[np.newaxis, :]) & 1).astype(np.uint8)
 
 
 @dataclass
@@ -273,3 +281,59 @@ class BCHCodewordGenerator(CodewordGenerator):
                 )
 
         return m, resolved_t, resolved_k
+
+
+# ---------------------------------------------------------------------------
+# Random linear code over GF(2)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class LinearCodeGenerator(CodewordGenerator):
+    """
+    Random linear code over GF(2) with affine offset.
+
+    For each identity i in [0, 2^n):
+        codeword(i) = (bits_of(i) @ G) mod 2  XOR  r
+
+    where G is a random (n, u) binary generator matrix and r is a random u-bit
+    affine offset vector, both derived deterministically from secret_key.
+    """
+
+    @property
+    def algorithm_tag(self) -> str:
+        return "linear"
+
+    def generate(self, *, workers: int, chunk_rows: Optional[int] = None) -> np.ndarray:
+        table_size = 2 ** self.n
+        bytes_per_code = (self.u + 7) // 8
+        chunk_rows = chunk_rows or self._default_chunk_rows()
+
+        # Derive G and r deterministically from secret_key
+        seed_G = _derive_seed(self.secret_key, "linear-G")
+        seed_r = _derive_seed(self.secret_key, "linear-r")
+
+        rng_G = np.random.default_rng(seed_G)
+        G = rng_G.integers(0, 2, size=(self.n, self.u), dtype=np.uint8)
+
+        rng_r = np.random.default_rng(seed_r)
+        r = rng_r.integers(0, 2, size=self.u, dtype=np.uint8)
+
+        # Pre-allocate packed output
+        packed_bits = np.empty((table_size, bytes_per_code), dtype=np.uint8)
+
+        chunks = [(start, min(table_size, start + chunk_rows))
+                  for start in range(0, table_size, chunk_rows)]
+
+        for start, end in tqdm(chunks, desc="Generating linear codewords", unit="chunk"):
+            M = _build_message_matrix(start, end, self.n)
+            codewords = np.asarray((M @ G) % 2, dtype=np.uint8)
+            codewords ^= r
+            packed_bits[start:end] = _pack_bits_2d(codewords, self.u)
+
+        return packed_bits
+
+    def _default_chunk_rows(self) -> int:
+        target_bytes = 32 * 1024 * 1024
+        rows = max(4096, min(1048576, target_bytes // max(1, self.u)))
+        return int(rows)
