@@ -8,6 +8,7 @@ import os
 import time
 from datetime import datetime
 from multiprocessing import Process, Queue
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import src.paths as paths
 from src.utils import get_shuffled_essays
 from src.llm_watermark import LLMWatermarkEncoder, LLMWatermarkDecoder
@@ -99,6 +100,10 @@ def main():
     # step-by-step execution without producer/consumer overlap.
     parser.add_argument("--synch", action="store_true", help="Run synchronously in a single process (disable GPU worker and queue)")
     parser.add_argument("--num-gpus", type=int, default=0, help="Number of GPUs for parallel generation (0 = all available, default: 0)")
+    parser.add_argument("--dedicated-search-gpu", action="store_true",
+        help="Reserve last GPU for Triton search (requires --distance levenshtein-triton, >= 2 GPUs)")
+    parser.add_argument("--delayed-search", action="store_true",
+        help="All GPUs generate first, then all search in parallel (requires --distance levenshtein-triton)")
 
     args = parser.parse_args()
 
@@ -133,6 +138,31 @@ def main():
         else:
             num_gpus = 0
             print(f"Device: {device} (CUDA not available, falling back to CPU)\n")
+
+    # Validate --dedicated-search-gpu and --delayed-search flags
+    if args.dedicated_search_gpu and args.delayed_search:
+        parser.error("--dedicated-search-gpu and --delayed-search are mutually exclusive")
+    if args.dedicated_search_gpu:
+        if args.distance != "levenshtein-triton":
+            parser.error("--dedicated-search-gpu requires --distance levenshtein-triton")
+        if num_gpus < 2:
+            parser.error(f"--dedicated-search-gpu requires at least 2 GPUs (found {num_gpus})")
+        if args.synch:
+            parser.error("--dedicated-search-gpu cannot be used with --synch")
+    if args.delayed_search:
+        if args.distance != "levenshtein-triton":
+            parser.error("--delayed-search requires --distance levenshtein-triton")
+        if args.synch:
+            parser.error("--delayed-search cannot be used with --synch")
+
+    # Compute generation GPU count and search device
+    if args.dedicated_search_gpu:
+        generation_gpus = num_gpus - 1
+        search_device = f"cuda:{num_gpus - 1}"
+        print(f"Dedicated search GPU: {search_device} (generation on {generation_gpus} GPU{'s' if generation_gpus > 1 else ''})")
+    else:
+        generation_gpus = num_gpus
+        search_device = None
 
     print(f"Using secret key: {args.secret_key}\n")
 
@@ -226,6 +256,8 @@ def main():
             "timestamp": timestamp,
             "device": device,
             "num_gpus": num_gpus,
+            "dedicated_search_gpu": args.dedicated_search_gpu,
+            "delayed_search": args.delayed_search,
         },
     }
     with open(os.path.join(output_dir, "config.json"), "w", encoding="utf-8") as f:
@@ -282,7 +314,12 @@ def main():
     if args.distance == "hamming":
         codebook = CodebookHamming(base_codebook)
     elif args.distance == "levenshtein-triton":
-        codebook = CodebookLevenshteinTriton(base_codebook)
+        if args.delayed_search:
+            codebook = None  # Created after generation to save GPU memory
+        elif args.dedicated_search_gpu:
+            codebook = CodebookLevenshteinTriton(base_codebook, device=search_device)
+        else:
+            codebook = CodebookLevenshteinTriton(base_codebook)
     else:
         codebook = CodebookLevenshtein(base_codebook)
 
@@ -312,9 +349,10 @@ def main():
     #----------------------------------------#
     
     # Pre-collect all (prompt_idx, prompt, codeword, watermark_identity) tuples
+    row_source = codebook if codebook is not None else base_codebook
     batch_items = []
     for prompt_idx, prompt in enumerate(prompts):
-        codeword, watermark_identity = codebook.get_random_row(args.seed + prompt_idx)
+        codeword, watermark_identity = row_source.get_random_row(args.seed + prompt_idx)
         batch_items.append((prompt_idx, prompt, codeword, watermark_identity))
     
     if args.verbose:
@@ -351,9 +389,9 @@ def main():
         if args.verbose:
             print("GPU generation worker process started")
     else:
-        # Multi-GPU: round-robin distribute prompts across workers
-        for gpu_id in range(num_gpus):
-            worker_items = [item for i, item in enumerate(batch_items) if i % num_gpus == gpu_id]
+        # Multi-GPU: round-robin distribute prompts across generation workers
+        for gpu_id in range(generation_gpus):
+            worker_items = [item for i, item in enumerate(batch_items) if i % generation_gpus == gpu_id]
             if not worker_items:
                 continue
             worker_config = {**watermarker_config, 'device': f'cuda:{gpu_id}'}
@@ -366,7 +404,7 @@ def main():
             gpu_processes.append(p)
             num_active_workers += 1
         if args.verbose:
-            print(f"Started {num_active_workers} GPU generation workers across {num_gpus} GPUs")
+            print(f"Started {num_active_workers} GPU generation workers across {generation_gpus} GPUs")
 
     #----------------------------------------#
     #    Consumer Loop (Main Thread)         #
@@ -382,6 +420,7 @@ def main():
     
     processed_count = 0
     sentinels_received = 0
+    pending_searches = []  # For --delayed-search: collect decoded queries for batch search
 
     while True:
         wait_start = time.time()
@@ -456,36 +495,45 @@ def main():
         except Exception as e:
             print(f"Warning: Failed to write generations.txt: {e}")
         
-        # Find closest match using codebook search (CPU-intensive)
-        search_start = time.time()
-        best_codeword_match, retrieved_watermark, search_distance = codebook.find_closest_match(decoded_codeword)
-        search_time = time.time() - search_start
-        codebook_search_times.append(search_time)
-        
-        if args.verbose:
-            print(f"\tQueue wait: {wait_time * 1000:.2f} ms")
-            print(f"\tSearch time: {search_time * 1000:.2f} ms\n")
-        
-        # Convert to string for easier output
-        codeword_str = ''.join(map(str, codeword))
-        decoded_codeword_str = ''.join(map(str, decoded_codeword))
-        
-        # Check if watermarking was successful
-        successful_watermark_flag = bool(retrieved_watermark == watermark_identity)
-        if successful_watermark_flag:
-            successful_watermark_recoveries += 1
-            successful_search_distances.append(search_distance)
-        
-        # Record in DataFrame
-        generations_df.loc[len(generations_df)] = {
-            "codeword": codeword_str,
-            "watermark": int(watermark_identity),
-            "decoded_codeword": decoded_codeword_str,
-            "retrieved_watermark": retrieved_watermark,
-            "successful_watermark": successful_watermark_flag,
-            "distance": search_distance,
-        }
-        
+        if args.delayed_search:
+            # Collect data for batch search after generation completes
+            pending_searches.append({
+                'prompt_idx': prompt_idx,
+                'codeword': codeword,
+                'watermark_identity': watermark_identity,
+                'decoded_codeword': decoded_codeword,
+            })
+        else:
+            # Real-time search (default or --dedicated-search-gpu)
+            search_start = time.time()
+            best_codeword_match, retrieved_watermark, search_distance = codebook.find_closest_match(decoded_codeword)
+            search_time = time.time() - search_start
+            codebook_search_times.append(search_time)
+
+            if args.verbose:
+                print(f"\tQueue wait: {wait_time * 1000:.2f} ms")
+                print(f"\tSearch time: {search_time * 1000:.2f} ms\n")
+
+            # Convert to string for easier output
+            codeword_str = ''.join(map(str, codeword))
+            decoded_codeword_str = ''.join(map(str, decoded_codeword))
+
+            # Check if watermarking was successful
+            successful_watermark_flag = bool(retrieved_watermark == watermark_identity)
+            if successful_watermark_flag:
+                successful_watermark_recoveries += 1
+                successful_search_distances.append(search_distance)
+
+            # Record in DataFrame
+            generations_df.loc[len(generations_df)] = {
+                "codeword": codeword_str,
+                "watermark": int(watermark_identity),
+                "decoded_codeword": decoded_codeword_str,
+                "retrieved_watermark": retrieved_watermark,
+                "successful_watermark": successful_watermark_flag,
+                "distance": search_distance,
+            }
+
         processing_progress.update(1)
         processed_count += 1
     
@@ -493,6 +541,83 @@ def main():
 
     for p in gpu_processes:
         p.join()
+
+    #----------------------------------------#
+    #    Delayed Batch Search Phase          #
+    #----------------------------------------#
+
+    if args.delayed_search and pending_searches:
+        print(f"\nGeneration complete. Starting delayed batch search across {num_gpus} GPUs...")
+
+        # Workers are joined; GPU memory is freed. Create Triton codebook per GPU.
+        search_codebooks = []
+        for gpu_id in range(num_gpus):
+            cb = CodebookLevenshteinTriton(base_codebook, device=f'cuda:{gpu_id}')
+            search_codebooks.append(cb)
+
+        # Distribute queries round-robin across GPUs
+        per_gpu_queries = [[] for _ in range(num_gpus)]
+        per_gpu_indices = [[] for _ in range(num_gpus)]
+        for i, ps in enumerate(pending_searches):
+            gpu_id = i % num_gpus
+            per_gpu_queries[gpu_id].append(np.asarray(ps['decoded_codeword'], dtype=np.uint8))
+            per_gpu_indices[gpu_id].append(i)
+
+        def search_on_gpu(gpu_id):
+            """Run batch search on a single GPU. Returns list of (orig_idx, watermark, distance)."""
+            queries = per_gpu_queries[gpu_id]
+            indices = per_gpu_indices[gpu_id]
+            if not queries:
+                return []
+            cb = search_codebooks[gpu_id]
+            _, watermark_ids, distances = cb.find_closest_match_batch(queries)
+            return [(indices[j], int(watermark_ids[j]), int(distances[j])) for j in range(len(indices))]
+
+        # Run search in parallel (Triton releases GIL during kernel execution)
+        search_start = time.time()
+        all_search_results = {}
+
+        with ThreadPoolExecutor(max_workers=num_gpus) as executor:
+            futures = {executor.submit(search_on_gpu, gpu_id): gpu_id for gpu_id in range(num_gpus)}
+            for future in as_completed(futures):
+                gpu_id = futures[future]
+                try:
+                    for orig_idx, wm, dist in future.result():
+                        all_search_results[orig_idx] = (wm, dist)
+                except Exception as e:
+                    print(f"Error: Triton search failed on cuda:{gpu_id}: {e}")
+                    raise
+
+        total_search_time = time.time() - search_start
+        avg_search_per_query = total_search_time / len(pending_searches)
+        print(f"Delayed batch search completed in {total_search_time:.2f}s "
+              f"({len(pending_searches)} queries across {num_gpus} GPUs, "
+              f"{avg_search_per_query * 1000:.1f} ms/query)")
+
+        # Populate statistics and DataFrame from search results
+        for i, ps in enumerate(pending_searches):
+            if i not in all_search_results:
+                continue
+            retrieved_watermark, search_distance = all_search_results[i]
+            codebook_search_times.append(avg_search_per_query)
+
+            codeword_str = ''.join(map(str, ps['codeword']))
+            decoded_codeword_str = ''.join(map(str, ps['decoded_codeword']))
+            watermark_identity = ps['watermark_identity']
+
+            successful_watermark_flag = bool(retrieved_watermark == watermark_identity)
+            if successful_watermark_flag:
+                successful_watermark_recoveries += 1
+                successful_search_distances.append(search_distance)
+
+            generations_df.loc[len(generations_df)] = {
+                "codeword": codeword_str,
+                "watermark": int(watermark_identity),
+                "decoded_codeword": decoded_codeword_str,
+                "retrieved_watermark": retrieved_watermark,
+                "successful_watermark": successful_watermark_flag,
+                "distance": search_distance,
+            }
 
     #----------------------------------------#
     #           Results Summary              #
@@ -524,6 +649,10 @@ def main():
         f.write(f"Bias: {args.bias}\n")
         f.write(f"Temperature: {args.temperature}\n")
         f.write(f"Device: {device}\n")
+        if args.dedicated_search_gpu:
+            f.write(f"Search mode: dedicated-search-gpu (search on {search_device})\n")
+        elif args.delayed_search:
+            f.write(f"Search mode: delayed-search ({num_gpus} GPUs)\n")
         f.write(f"Timestamp: {timestamp}\n")
         f.write("\n")
         
