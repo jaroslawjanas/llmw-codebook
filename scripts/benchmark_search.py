@@ -49,8 +49,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--distance", type=str, required=True, choices=["hamming", "levenshtein", "levenshtein-triton"], help="Distance metric")
     parser.add_argument("--codebook-generation", type=str, default="rng", choices=["rng", "bch", "linear"], help="Codeword generation algorithm (default: rng)")
     parser.add_argument("--secret-key", type=str, default="25111915", help="Codebook secret key (default: 25111915)")
-    parser.add_argument("--bch-t", type=int, default=None, help="BCH error-correction parameter t")
-    parser.add_argument("--bch-m", type=int, default=None, help="BCH field degree m")
+    parser.add_argument("--bch-m", type=int, default=None, help="BCH field degree m (n0=2^m-1). If None, auto-select optimal")
 
     # Benchmark parameters
     parser.add_argument("--z", type=int, required=True, help="Number of random query codewords")
@@ -151,7 +150,6 @@ def write_results(args: argparse.Namespace, results: dict, save_path: str) -> No
     lines.append(f"  codebook generation: {args.codebook_generation}")
     lines.append(f"  secret key: {args.secret_key}")
     if args.codebook_generation == "bch":
-        lines.append(f"  bch_t: {args.bch_t}")
         lines.append(f"  bch_m: {args.bch_m}")
     lines.append("")
     lines.append("Benchmark Parameters:")
@@ -191,7 +189,7 @@ def main() -> None:
         generator_kwargs = {}
     else:
         generator_cls = BCHCodewordGenerator
-        generator_kwargs = {"t": args.bch_t, "m": args.bch_m}
+        generator_kwargs = {"m": args.bch_m}
 
     base_codebook = CodebookBase(
         n=args.n,

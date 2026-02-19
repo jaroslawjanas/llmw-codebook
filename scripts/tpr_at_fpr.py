@@ -11,7 +11,7 @@ Usage examples:
   python scripts/tpr_at_fpr.py --n 20 --u 128 --z 10000 --distance hamming --verbose
   python scripts/tpr_at_fpr.py --n 20 --u 128 --z 50000 --distance hamming --fpr-target 0.01
   python scripts/tpr_at_fpr.py --n 20 --u 128 --z 10000 --distance hamming --include-models Llama-3.2-3B
-  python scripts/tpr_at_fpr.py --n 16 --u 128 --z 10000 --distance levenshtein --codebook-generation bch --bch-m 8 --bch-t 7
+  python scripts/tpr_at_fpr.py --n 16 --u 128 --z 10000 --distance levenshtein --codebook-generation bch --bch-m 8
 """
 
 from __future__ import annotations
@@ -78,9 +78,8 @@ def _build_cache_basename(args: argparse.Namespace) -> str:
         distance,
     ]
     if args.codebook_generation == "bch":
-        t_tag = "auto" if args.bch_t is None else str(args.bch_t)
         m_tag = "auto" if args.bch_m is None else str(args.bch_m)
-        parts.append(f"bchm{m_tag}_bcht{t_tag}")
+        parts.append(f"bchm{m_tag}")
     return "_".join(parts)
 
 
@@ -94,7 +93,6 @@ def _build_cache_config(args: argparse.Namespace) -> dict:
         "secret_key": args.secret_key,
         "codebook_generation": args.codebook_generation,
         "distance": args.distance,
-        "bch_t": args.bch_t,
         "bch_m": args.bch_m,
     }
 
@@ -535,8 +533,7 @@ def main():
     parser.add_argument("--z", type=int, required=True, help="Number of random negative samples")
     parser.add_argument("--fpr-target", type=float, default=0.01, help="Target FPR (default: 0.01)")
     parser.add_argument("--secret-key", type=str, default="25111915", help="Codebook secret key (default: 25111915)")
-    parser.add_argument("--bch-t", type=int, default=None, help="BCH error-correction parameter t")
-    parser.add_argument("--bch-m", type=int, default=None, help="BCH field degree m")
+    parser.add_argument("--bch-m", type=int, default=None, help="BCH field degree m (n0=2^m-1). If None, auto-select optimal")
     parser.add_argument("--output-root", type=str, default="output", help="Root directory with experiment outputs (default: output)")
     parser.add_argument("--save-dir", type=str, default="output", help="Directory to save analysis outputs (default: output)")
     parser.add_argument("--include-models", type=str, nargs="+", default=None, help="Substring filter for model names")
@@ -557,7 +554,7 @@ def main():
         generator_kwargs = {}
     else:
         generator_cls = BCHCodewordGenerator
-        generator_kwargs = {"t": args.bch_t, "m": args.bch_m}
+        generator_kwargs = {"m": args.bch_m}
 
     base_codebook = CodebookBase(
         n=args.n,
