@@ -60,7 +60,7 @@ def discover_experiments(output_dir: Path | str = None) -> pd.DataFrame:
                 "dataset": config["dataset"]["name"],
                 "n": config["watermark"]["n"],
                 "u": config["watermark"]["u"],
-                "distance": config["watermark"].get("distance", "hamming"),
+                "distance": config["watermark"].get("distance", "hamming").replace("-triton", ""),
                 "codeword_generation": config["watermark"].get("codeword_generation", "rng"),
                 "timestamp": config["experiment"]["timestamp"],
                 "path": exp_dir,
