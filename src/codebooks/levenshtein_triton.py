@@ -571,6 +571,7 @@ def _myers_search_triton(
         (best_index, best_distance) as Python ints.
     """
     device = codebook_packed.device
+    torch.cuda.set_device(device)  # Ensure Triton launches kernel on correct GPU
     N = codebook_packed.shape[0]
     num_cb_words = codebook_packed.shape[1]
 
