@@ -33,13 +33,17 @@ import numpy as np
 import pandas as pd
 
 import src.paths as paths
-from scripts.utils import load_experiment
+from scripts.utils import (
+    create_triton_codebooks,
+    load_experiment,
+    multi_gpu_triton_batch_search,
+    resolve_triton_gpu_count,
+)
 from src.codebooks import (
     BCHCodewordGenerator,
     CodebookBase,
     CodebookHamming,
     CodebookLevenshtein,
-    CodebookLevenshteinTriton,
     LinearCodeGenerator,
     RNGCodewordGenerator,
 )
@@ -61,6 +65,7 @@ def main():
         choices=["hamming", "levenshtein", "levenshtein-triton"],
         help="Target distance metric",
     )
+    parser.add_argument("--num-gpus", type=int, default=0, help="Number of GPUs for Triton search (0 = all available, default: 0)")
     parser.add_argument("--verbose", action="store_true", help="Show detailed progress")
 
     args = parser.parse_args()
@@ -145,10 +150,15 @@ def main():
         print(f"Codebook hash verified: {computed_hash[:16]}...")
 
     # Wrap with target metric
+    codebooks = None
     if args.distance == "hamming":
         codebook = CodebookHamming(base_codebook)
     elif args.distance == "levenshtein-triton":
-        codebook = CodebookLevenshteinTriton(base_codebook)
+        num_gpus = resolve_triton_gpu_count(args.num_gpus)
+        codebooks = create_triton_codebooks(base_codebook, num_gpus)
+        codebook = codebooks[0]
+        if args.verbose:
+            print(f"Triton search across {num_gpus} GPU{'s' if num_gpus > 1 else ''}")
     else:
         codebook = CodebookLevenshtein(base_codebook)
 
@@ -177,8 +187,11 @@ def main():
             dist_arr, idx_arr = codebook.index.search(packed, 1)
             distances = dist_arr[:, 0].astype(np.int32)
             retrieved_watermarks = base_codebook.watermark_identities[idx_arr[:, 0]]
+        elif codebooks and len(codebooks) > 1:
+            # Multi-GPU Triton search
+            _, retrieved_watermarks, distances = multi_gpu_triton_batch_search(codebooks, queries)
         else:
-            # Levenshtein / Triton batch search
+            # Single-GPU Levenshtein / Triton batch search
             _, retrieved_watermarks, distances = codebook.find_closest_match_batch(queries)
 
         search_time = time.time() - search_start

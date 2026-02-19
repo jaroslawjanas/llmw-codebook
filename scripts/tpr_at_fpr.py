@@ -22,7 +22,6 @@ import math
 import os
 import re
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -37,13 +36,18 @@ import pandas as pd
 from tqdm import tqdm
 
 import src.paths as paths
-from scripts.utils import discover_experiments, load_and_merge
+from scripts.utils import (
+    create_triton_codebooks,
+    discover_experiments,
+    load_and_merge,
+    multi_gpu_triton_batch_search,
+    resolve_triton_gpu_count,
+)
 from src.codebooks import (
     BCHCodewordGenerator,
     CodebookBase,
     CodebookHamming,
     CodebookLevenshtein,
-    CodebookLevenshteinTriton,
     LinearCodeGenerator,
     RNGCodewordGenerator,
 )
@@ -105,7 +109,9 @@ def _validate_cache_config(cached: dict, current: dict) -> bool:
     return True
 
 
-def load_or_generate_negatives(args: argparse.Namespace, codebook) -> np.ndarray:
+def load_or_generate_negatives(
+    args: argparse.Namespace, codebook, codebooks: list | None = None,
+) -> np.ndarray:
     """Load cached negative distances or generate and cache them."""
     os.makedirs(paths.SCRIPTS_CACHE_DIR, exist_ok=True)
 
@@ -130,7 +136,9 @@ def load_or_generate_negatives(args: argparse.Namespace, codebook) -> np.ndarray
 
     # Generate from scratch
     print(f"Generating {args.z} negative distances (distance={args.distance}, codebook={args.codebook_generation})...")
-    distances = _generate_negative_distances(codebook, args.z, args.u, args.seed, args.verbose)
+    distances = _generate_negative_distances(
+        codebook, args.z, args.u, args.seed, args.verbose, codebooks=codebooks,
+    )
 
     # Save cache
     try:
@@ -145,11 +153,15 @@ def load_or_generate_negatives(args: argparse.Namespace, codebook) -> np.ndarray
     return distances
 
 
-def _generate_negative_distances(codebook, z: int, u: int, seed: int, verbose: bool) -> np.ndarray:
+def _generate_negative_distances(
+    codebook, z: int, u: int, seed: int, verbose: bool,
+    codebooks: list | None = None,
+) -> np.ndarray:
     """Generate z random bit sequences and find closest codebook match for each.
 
     For Hamming (Faiss), uses batch search for speed.
-    For Levenshtein (Numba), uses batch search for speed.
+    For Levenshtein (Numba/Triton), uses batch search for speed.
+    When codebooks (list of Triton instances) is provided, uses multi-GPU search.
     """
     rng = np.random.default_rng(seed)
 
@@ -164,12 +176,16 @@ def _generate_negative_distances(codebook, z: int, u: int, seed: int, verbose: b
         distances_arr, _ = codebook.index.search(queries, 1)
         return distances_arr[:, 0].astype(np.int32)
     else:
-        # Levenshtein: batch Numba search
+        # Levenshtein: batch search (multi-GPU when available)
         if verbose:
             print(f"Generating {z} random bit sequences...")
         random_bits = rng.integers(0, 2, size=(z, u), dtype=np.uint8)
         if verbose:
             print(f"Running batch Levenshtein search over {z} queries...")
+        if codebooks and len(codebooks) > 1:
+            return multi_gpu_triton_batch_search(
+                codebooks, random_bits, distances_only=True,
+            ).astype(np.int32)
         return codebook.find_closest_match_batch(random_bits, distances_only=True).astype(np.int32)
 
 
@@ -537,6 +553,7 @@ def main():
     parser.add_argument("--output-root", type=str, default="output", help="Root directory with experiment outputs (default: output)")
     parser.add_argument("--save-dir", type=str, default="output", help="Directory to save analysis outputs (default: output)")
     parser.add_argument("--include-models", type=str, nargs="+", default=None, help="Substring filter for model names")
+    parser.add_argument("--num-gpus", type=int, default=0, help="Number of GPUs for Triton search (0 = all available, default: 0)")
     parser.add_argument("--verbose", action="store_true", help="Show detailed progress")
     parser.add_argument("--show", action="store_true", help="Display plots interactively")
 
@@ -563,15 +580,20 @@ def main():
         generator_cls=generator_cls,
         generator_kwargs=generator_kwargs,
     )
+    codebooks = None
     if args.distance == "hamming":
         codebook = CodebookHamming(base_codebook)
     elif args.distance == "levenshtein-triton":
-        codebook = CodebookLevenshteinTriton(base_codebook)
+        num_gpus = resolve_triton_gpu_count(args.num_gpus)
+        codebooks = create_triton_codebooks(base_codebook, num_gpus)
+        codebook = codebooks[0]
+        if args.verbose:
+            print(f"Triton search across {num_gpus} GPU{'s' if num_gpus > 1 else ''}")
     else:
         codebook = CodebookLevenshtein(base_codebook)
 
     # Step 1: Generate or load negative distances
-    neg_distances = load_or_generate_negatives(args, codebook)
+    neg_distances = load_or_generate_negatives(args, codebook, codebooks=codebooks)
     if args.verbose:
         print(f"Negative distances: {len(neg_distances)} samples, range [{neg_distances.min()}, {neg_distances.max()}]")
 

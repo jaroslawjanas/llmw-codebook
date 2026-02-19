@@ -44,12 +44,16 @@ from scripts.tpr_at_fpr import (
     sanitize_filename,
     shorten_model_name,
 )
+from scripts.utils import (
+    create_triton_codebooks,
+    multi_gpu_triton_batch_search,
+    resolve_triton_gpu_count,
+)
 from src.codebooks import (
     BCHCodewordGenerator,
     CodebookBase,
     CodebookHamming,
     CodebookLevenshtein,
-    CodebookLevenshteinTriton,
     LinearCodeGenerator,
     RNGCodewordGenerator,
 )
@@ -90,6 +94,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-root", type=str, default="output", help="Root directory with experiment outputs (default: output)")
     parser.add_argument("--save-dir", type=str, default="output", help="Directory to save analysis outputs (default: output)")
     parser.add_argument("--include-models", type=str, nargs="+", default=None, help="Substring filter for model names")
+
+    # GPU
+    parser.add_argument("--num-gpus", type=int, default=0, help="Number of GPUs for Triton search (0 = all available, default: 0)")
 
     # Display
     parser.add_argument("--verbose", action="store_true", help="Show detailed progress")
@@ -196,6 +203,7 @@ def evaluate_attack_robustness(
     u: int,
     seed: int,
     attack_name: str,
+    codebooks: list | None = None,
 ) -> tuple[dict[int, float], list[dict]]:
     """
     Evaluate TPR at each specified budget level.
@@ -257,10 +265,15 @@ def evaluate_attack_robustness(
             else:
                 tp = 0
         else:
-            # Levenshtein: batch Numba search (handles variable-length codewords)
+            # Levenshtein: batch search (handles variable-length codewords)
             attacked_list = [attack_fn(cw, budget, rng) for cw in decoded_codewords]
             if attacked_list:
-                best_indices, retrieved_wm, dist_arr = codebook.find_closest_match_batch(attacked_list)
+                if codebooks and len(codebooks) > 1:
+                    best_indices, retrieved_wm, dist_arr = multi_gpu_triton_batch_search(
+                        codebooks, attacked_list,
+                    )
+                else:
+                    best_indices, retrieved_wm, dist_arr = codebook.find_closest_match_batch(attacked_list)
                 correct_id = (retrieved_wm == original_watermarks)
                 tp = int((correct_id & (dist_arr <= threshold)).sum())
 
@@ -449,15 +462,20 @@ def main() -> None:
         generator_cls=generator_cls,
         generator_kwargs=generator_kwargs,
     )
+    codebooks = None
     if args.distance == "hamming":
         codebook = CodebookHamming(base_codebook)
     elif args.distance == "levenshtein-triton":
-        codebook = CodebookLevenshteinTriton(base_codebook)
+        num_gpus = resolve_triton_gpu_count(args.num_gpus)
+        codebooks = create_triton_codebooks(base_codebook, num_gpus)
+        codebook = codebooks[0]
+        if args.verbose:
+            print(f"Triton search across {num_gpus} GPU{'s' if num_gpus > 1 else ''}")
     else:
         codebook = CodebookLevenshtein(base_codebook)
 
     # Step 1: Compute FPR threshold
-    neg_distances = load_or_generate_negatives(args, codebook)
+    neg_distances = load_or_generate_negatives(args, codebook, codebooks=codebooks)
     threshold, actual_fpr = find_threshold(neg_distances, args.fpr_target)
     print(f"Threshold: {threshold} | Target FPR: {args.fpr_target * 100:.2f}% | Actual FPR: {actual_fpr * 100:.2f}%")
 
@@ -533,6 +551,7 @@ def main() -> None:
                 u=args.u,
                 seed=args.seed,
                 attack_name=attack_name,
+                codebooks=codebooks,
             )
             attack_results[attack_name] = tpr_dict
             for row in detail_rows:
