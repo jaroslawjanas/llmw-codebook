@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import random
 import numpy as np
 import torch
@@ -258,9 +259,6 @@ def main():
             "delayed_search": args.delayed_search,
         },
     }
-    with open(os.path.join(output_dir, "config.json"), "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2)
-
     stats_file = os.path.join(output_dir, "statistics.csv")
     generations_txt_file = os.path.join(output_dir, "generations.txt")
     try:
@@ -312,6 +310,11 @@ def main():
         workers=args.workers,
         chunk_rows=args.chunk_rows
     )
+    codebook_hash = hashlib.sha256(base_codebook.packed_codes.tobytes()).hexdigest()
+    config["watermark"]["codebook_hash"] = codebook_hash
+    with open(os.path.join(output_dir, "config.json"), "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2)
+
     if args.distance == "hamming":
         codebook = CodebookHamming(base_codebook)
     elif args.distance == "levenshtein-triton":
