@@ -89,7 +89,7 @@ def main():
     parser.add_argument("--context-window", type=int, default=1500, help="Maximum number of tokens to use as context for generation (default: 1500)")
     parser.add_argument("--temperature", "--temp", type=float, default=0.0, help="Sampling temperature (default: 0.0 = greedy sampling, higher = more random)")
     parser.add_argument("--hash-window", type=int, default=1, help="Number of previous tokens to hash together (default: 1)") 
-    parser.add_argument("--n-prompts", type=int, default=1, help="Number of prompts to process (default: 1)")
+    parser.add_argument("--n-prompts", type=str, default="1", help="Number of prompts to process, or 'all' for entire dataset (default: 1)")
     parser.add_argument("--verbose", action="store_true", help="Show detailed output and progress information")
     parser.add_argument("--stats", action="store_true", help="Show statistics summary in console (statistics are always saved to file)")
     parser.add_argument("--force-tokenization", action="store_true", help="Force detokenization and retokenization of text for decoding instead of using token IDs directly")
@@ -182,6 +182,17 @@ def main():
     dataset_split = args.dataset[2]
     dataset_column = args.dataset[3]
 
+    # Parse --n-prompts: "all" or integer
+    if args.n_prompts.lower() == "all":
+        n_prompts = None
+    else:
+        try:
+            n_prompts = int(args.n_prompts)
+        except ValueError:
+            parser.error(f"--n-prompts must be a positive integer or 'all', got '{args.n_prompts}'")
+        if n_prompts < 1:
+            parser.error(f"--n-prompts must be a positive integer or 'all', got '{args.n_prompts}'")
+
     # Get prompts
     if args.prompt:
         # Single custom prompt
@@ -199,7 +210,7 @@ def main():
             dataset_split=dataset_split,
             dataset_column=dataset_column,
             seed=args.seed,
-            n_prompts=args.n_prompts
+            n_prompts=n_prompts
         )
         if args.verbose:
             print(f"\n--- Prompt from {dataset_name}/{dataset_subset} ({dataset_split} split, {dataset_column} column) ---")
@@ -248,7 +259,7 @@ def main():
             "max_tokens": args.max_tokens,
             "effective_max_tokens": effective_max_tokens,
             "temperature": args.temperature,
-            "n_prompts": args.n_prompts,
+            "n_prompts": total_prompts,
             "seed": args.seed,
         },
         "experiment": {
@@ -644,7 +655,7 @@ def main():
         f.write(f"Dataset: {dataset_name}/{dataset_subset} ({dataset_split} split, {dataset_column} column)\n")
         f.write(f"n (code table size): {args.n}\n")
         f.write(f"u (code size): {args.u}\n")
-        f.write(f"Number of prompts: {args.n_prompts}\n")
+        f.write(f"Number of prompts: {total_prompts}\n")
         f.write(f"Max tokens (requested): {args.max_tokens if args.max_tokens is not None else 'None (default -> u)'}\n")
         f.write(f"Max tokens (effective): {effective_max_tokens}\n")
         f.write(f"Seed: {args.seed}\n")
