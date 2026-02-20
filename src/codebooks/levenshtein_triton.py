@@ -557,8 +557,9 @@ def _myers_search_triton(
     codebook_packed: torch.Tensor,
     code_len: int,
     chunk_size: int = 1 << 20,
-) -> Tuple[int, int]:
-    """Find closest codebook entry to a single query using Triton kernel.
+    top_k: int = 1,
+) -> Tuple[int, int] | Tuple[np.ndarray, np.ndarray]:
+    """Find closest codebook entry(ies) to a single query using Triton kernel.
 
     Args:
         query_packed: (num_query_words,) int64 tensor on device.
@@ -566,9 +567,11 @@ def _myers_search_triton(
         codebook_packed: (N, num_text_words) int64 tensor on device.
         code_len: codeword length in bits (u).
         chunk_size: max entries per GPU chunk to cap memory.
+        top_k: number of closest entries to return.
 
     Returns:
-        (best_index, best_distance) as Python ints.
+        top_k == 1: (best_index, best_distance) as Python ints.
+        top_k > 1: (indices, distances) as numpy arrays of shape (top_k,).
     """
     device = codebook_packed.device
     torch.cuda.set_device(device)  # Ensure Triton launches kernel on correct GPU
@@ -602,8 +605,14 @@ def _myers_search_triton(
     else:
         effective_chunk = chunk_size
 
-    best_idx = 0
-    best_dist = m + n + 1
+    # Top-k tracking
+    max_dist = m + n + 1
+    if top_k <= 1:
+        best_idx = 0
+        best_dist = max_dist
+    else:
+        topk_dists = np.full(top_k, max_dist, dtype=np.int32)
+        topk_idxs = np.zeros(top_k, dtype=np.int64)
 
     for chunk_start in range(0, N, effective_chunk):
         chunk_end = min(chunk_start + effective_chunk, N)
@@ -687,14 +696,30 @@ def _myers_search_triton(
 
             del Pv_buf, Mv_buf
 
-        # Find min in this chunk
-        chunk_min_val, chunk_min_local_idx = result.min(dim=0)
-        chunk_dist = chunk_min_val.item()
-        if chunk_dist < best_dist:
-            best_dist = chunk_dist
-            best_idx = chunk_start + chunk_min_local_idx.item()
+        # Reduce this chunk
+        if top_k <= 1:
+            chunk_min_val, chunk_min_local_idx = result.min(dim=0)
+            chunk_dist = chunk_min_val.item()
+            if chunk_dist < best_dist:
+                best_dist = chunk_dist
+                best_idx = chunk_start + chunk_min_local_idx.item()
+        else:
+            k_chunk = min(top_k, chunk_N)
+            chunk_vals, chunk_local = torch.topk(
+                result[:chunk_N], k=k_chunk, largest=False
+            )
+            chunk_dists = chunk_vals.cpu().numpy().astype(np.int32)
+            chunk_idxs = (chunk_start + chunk_local.cpu().numpy()).astype(np.int64)
+            # Merge with running top-k
+            merged_dists = np.concatenate([topk_dists, chunk_dists])
+            merged_idxs = np.concatenate([topk_idxs, chunk_idxs])
+            order = np.argsort(merged_dists)[:top_k]
+            topk_dists = merged_dists[order]
+            topk_idxs = merged_idxs[order]
 
-    return best_idx, best_dist
+    if top_k <= 1:
+        return best_idx, best_dist
+    return topk_idxs, topk_dists
 
 
 # ---------------------------------------------------------------------------
@@ -817,18 +842,24 @@ class CodebookLevenshteinTriton:
         queries: list[np.ndarray] | np.ndarray,
         *,
         distances_only: bool = False,
+        top_k: int = 1,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray] | np.ndarray:
         """
-        Batch search: find closest codebook entry for each query on GPU.
+        Batch search: find closest codebook entry(ies) for each query on GPU.
 
         Args:
             queries: List of 1D uint8 arrays (variable length allowed), or
                      a 2D uint8 array of shape (B, length) for uniform-length queries.
-            distances_only: If True, return only distances array (shape (B,), int32).
+            distances_only: If True, return only distances array.
+            top_k: Number of closest entries per query.
 
         Returns:
-            If distances_only=False: Tuple of (best_indices, watermark_ids, distances)
-            If distances_only=True: distances array only, shape (B,) int32.
+            top_k == 1:
+                distances_only=False: (best_indices(B,), watermark_ids(B,), distances(B,))
+                distances_only=True:  distances(B,) int32
+            top_k > 1:
+                distances_only=False: (indices(B,k), watermark_ids(B,k), distances(B,k))
+                distances_only=True:  distances(B,k) int32
         """
         if self._codebook_gpu is None or self.base.watermark_identities is None:
             raise RuntimeError("Levenshtein Triton codebook not initialized")
@@ -846,8 +877,12 @@ class CodebookLevenshteinTriton:
                 return empty_d
             return empty_i, empty_i.copy(), empty_d
 
-        best_indices = np.empty(B, dtype=np.int64)
-        best_distances = np.empty(B, dtype=np.int32)
+        if top_k <= 1:
+            out_shape = (B,)
+        else:
+            out_shape = (B, top_k)
+        best_indices = np.empty(out_shape, dtype=np.int64)
+        best_distances = np.empty(out_shape, dtype=np.int32)
 
         for qi in range(B):
             q_arr = np.asarray(query_list[qi], dtype=np.uint8).reshape(-1)
@@ -862,11 +897,16 @@ class CodebookLevenshteinTriton:
             q_packed_np = _pack_query_to_int64(q_arr, q_len)
             q_packed = torch.from_numpy(q_packed_np).to(self.device)
 
-            idx, dist = _myers_search_triton(
-                q_packed, q_len, self._codebook_gpu, self.u, self.chunk_size
+            result = _myers_search_triton(
+                q_packed, q_len, self._codebook_gpu, self.u, self.chunk_size,
+                top_k=top_k,
             )
-            best_indices[qi] = idx
-            best_distances[qi] = dist
+            if top_k <= 1:
+                best_indices[qi] = result[0]
+                best_distances[qi] = result[1]
+            else:
+                best_indices[qi] = result[0]
+                best_distances[qi] = result[1]
 
         if distances_only:
             return best_distances

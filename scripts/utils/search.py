@@ -49,6 +49,7 @@ def multi_gpu_triton_batch_search(
     queries: list[np.ndarray] | np.ndarray,
     *,
     distances_only: bool = False,
+    top_k: int = 1,
 ) -> np.ndarray | tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Run batch Levenshtein search across multiple Triton codebook instances.
 
@@ -59,17 +60,20 @@ def multi_gpu_triton_batch_search(
         codebooks: List of CodebookLevenshteinTriton instances (one per GPU).
         queries: List of 1D uint8 arrays or 2D (B, length) uint8 array.
         distances_only: If True, return only distances.
+        top_k: Number of closest entries per query.
 
     Returns:
-        If distances_only: np.ndarray of shape (B,) int32.
-        Else: tuple (best_indices, watermark_ids, distances) of arrays.
+        top_k == 1: same as find_closest_match_batch with (B,) shaped arrays.
+        top_k > 1: same but with (B, top_k) shaped arrays.
     """
     num_gpus = len(codebooks)
     n_queries = len(queries)
 
     # Single GPU: no threading overhead
     if num_gpus <= 1:
-        return codebooks[0].find_closest_match_batch(queries, distances_only=distances_only)
+        return codebooks[0].find_closest_match_batch(
+            queries, distances_only=distances_only, top_k=top_k,
+        )
 
     # Distribute queries round-robin across GPUs
     per_gpu_queries: list[list] = [[] for _ in range(num_gpus)]
@@ -86,7 +90,9 @@ def multi_gpu_triton_batch_search(
         # Stack into 2D array if all same length (common case)
         if isinstance(queries, np.ndarray) and queries.ndim == 2:
             q = np.stack(q)
-        return gpu_id, codebooks[gpu_id].find_closest_match_batch(q, distances_only=distances_only)
+        return gpu_id, codebooks[gpu_id].find_closest_match_batch(
+            q, distances_only=distances_only, top_k=top_k,
+        )
 
     # Run in parallel — Triton releases GIL during kernel execution
     gpu_results: dict = {}
@@ -98,16 +104,18 @@ def multi_gpu_triton_batch_search(
                 gpu_results[gid] = result
 
     # Merge results back in original order
+    out_shape = (n_queries,) if top_k <= 1 else (n_queries, top_k)
+
     if distances_only:
-        out_distances = np.empty(n_queries, dtype=np.int32)
+        out_distances = np.empty(out_shape, dtype=np.int32)
         for gid, dists in gpu_results.items():
             idx = np.array(per_gpu_indices[gid])
             out_distances[idx] = dists
         return out_distances
     else:
-        out_indices = np.empty(n_queries, dtype=np.int64)
-        out_watermarks = np.empty(n_queries, dtype=np.int64)
-        out_distances = np.empty(n_queries, dtype=np.int32)
+        out_indices = np.empty(out_shape, dtype=np.int64)
+        out_watermarks = np.empty(out_shape, dtype=np.int64)
+        out_distances = np.empty(out_shape, dtype=np.int32)
         for gid, (indices, watermarks, dists) in gpu_results.items():
             idx = np.array(per_gpu_indices[gid])
             out_indices[idx] = indices

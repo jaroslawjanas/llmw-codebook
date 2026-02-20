@@ -263,8 +263,9 @@ def _search_codebook_batch(
     query_lens: np.ndarray,
     codebook_packed: np.ndarray,
     code_len: int,
+    top_k: int = 1,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Find closest codebook entry for each query in a batch.
+    """Find closest codebook entry(ies) for each query in a batch.
 
     Parallelized across queries using prange. Each query scans the entire
     codebook sequentially (but different queries run on different cores).
@@ -274,34 +275,67 @@ def _search_codebook_batch(
         query_lens: (B,) int32, actual length of each query.
         codebook_packed: (N, num_words) uint64, codebook entries.
         code_len: codeword length in bits (u).
+        top_k: number of closest entries to return per query.
 
     Returns:
-        (best_indices, best_distances) — each shape (B,).
+        top_k == 1: (best_indices(B,), best_distances(B,))
+        top_k > 1: (best_indices(B,k), best_distances(B,k))
     """
     B = queries_packed.shape[0]
     N = codebook_packed.shape[0]
 
-    best_indices = np.empty(B, dtype=np.int64)
-    best_distances = np.empty(B, dtype=np.int32)
+    if top_k <= 1:
+        best_indices = np.empty(B, dtype=np.int64)
+        best_distances = np.empty(B, dtype=np.int32)
+
+        for q in prange(B):
+            q_packed = queries_packed[q]
+            q_len = int(query_lens[q])
+            q_num_words = (q_len + 63) // 64
+            q_trimmed = q_packed[:q_num_words]
+
+            local_best_idx = np.int64(0)
+            local_best_dist = np.int32(q_len + code_len + 1)
+
+            for i in range(N):
+                d = _myers_levenshtein(q_trimmed, q_len, codebook_packed[i], code_len)
+                if d < local_best_dist:
+                    local_best_dist = np.int32(d)
+                    local_best_idx = np.int64(i)
+
+            best_indices[q] = local_best_idx
+            best_distances[q] = local_best_dist
+
+        return best_indices, best_distances
+
+    # top_k > 1: track top-k with insertion sort
+    best_indices = np.empty((B, top_k), dtype=np.int64)
+    best_distances = np.empty((B, top_k), dtype=np.int32)
 
     for q in prange(B):
         q_packed = queries_packed[q]
         q_len = int(query_lens[q])
-        # Trim query packed to actual number of words needed
         q_num_words = (q_len + 63) // 64
         q_trimmed = q_packed[:q_num_words]
 
-        local_best_idx = np.int64(0)
-        local_best_dist = np.int32(q_len + code_len + 1)
+        max_dist = np.int32(q_len + code_len + 1)
+        local_dists = np.full(top_k, max_dist, dtype=np.int32)
+        local_idxs = np.zeros(top_k, dtype=np.int64)
 
         for i in range(N):
             d = _myers_levenshtein(q_trimmed, q_len, codebook_packed[i], code_len)
-            if d < local_best_dist:
-                local_best_dist = np.int32(d)
-                local_best_idx = np.int64(i)
+            if d < local_dists[top_k - 1]:
+                # Insertion sort: shift worse entries right
+                pos = top_k - 1
+                while pos > 0 and d < local_dists[pos - 1]:
+                    local_dists[pos] = local_dists[pos - 1]
+                    local_idxs[pos] = local_idxs[pos - 1]
+                    pos -= 1
+                local_dists[pos] = np.int32(d)
+                local_idxs[pos] = np.int64(i)
 
-        best_indices[q] = local_best_idx
-        best_distances[q] = local_best_dist
+        best_indices[q] = local_idxs
+        best_distances[q] = local_dists
 
     return best_indices, best_distances
 
@@ -443,21 +477,24 @@ class CodebookLevenshtein:
         queries: list[np.ndarray] | np.ndarray,
         *,
         distances_only: bool = False,
+        top_k: int = 1,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray] | np.ndarray:
         """
-        Batch search: find closest codebook entry for each query.
+        Batch search: find closest codebook entry(ies) for each query.
 
         Args:
             queries: List of 1D uint8 arrays (variable length allowed), or
                      a 2D uint8 array of shape (B, length) for uniform-length queries.
-            distances_only: If True, return only distances array (shape (B,), int32).
+            distances_only: If True, return only distances array.
+            top_k: Number of closest entries per query.
 
         Returns:
-            If distances_only=False: Tuple of (best_indices, watermark_ids, distances)
-                - best_indices: (B,) int64
-                - watermark_ids: (B,) int64
-                - distances: (B,) int32
-            If distances_only=True: distances array only, shape (B,) int32.
+            top_k == 1:
+                distances_only=False: (best_indices(B,), watermark_ids(B,), distances(B,))
+                distances_only=True:  distances(B,) int32
+            top_k > 1:
+                distances_only=False: (indices(B,k), watermark_ids(B,k), distances(B,k))
+                distances_only=True:  distances(B,k) int32
         """
         if self.codebook_packed is None or self.base.watermark_identities is None:
             raise RuntimeError("Levenshtein codebook not initialized")
@@ -508,7 +545,7 @@ class CodebookLevenshtein:
 
         # Batch search
         best_indices, best_distances = _search_codebook_batch(
-            queries_packed, query_lens, self.codebook_packed, self.u
+            queries_packed, query_lens, self.codebook_packed, self.u, top_k
         )
 
         if distances_only:
