@@ -237,7 +237,7 @@ def main() -> None:
     save_dir = os.path.join(
         args.save_dir,
         f"benchmark_n{args.n}_u{args.u}_z{args.z}"
-        f"_dist-{args.distance}_{args.codebook_generation}_{timestamp}",
+        f"_dist-{args.distance}_c-{args.codebook_generation}_{timestamp}",
     )
     save_path = os.path.join(save_dir, "results.txt")
     write_results(args, results, save_path)

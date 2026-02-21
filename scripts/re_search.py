@@ -212,7 +212,7 @@ def main():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     model_name_clean = config["model"]["name"].replace("/", "_")
     dataset_name_clean = config["dataset"]["name"].replace("/", "_")
-    output_subdir = f"{model_name_clean}_{dataset_name_clean}_n{n}_u{u}_{args.distance}_{timestamp}"
+    output_subdir = f"{model_name_clean}_{dataset_name_clean}_n{n}_u{u}_c-{codeword_generation}_{args.distance}_{timestamp}"
     output_dir = os.path.join("output", output_subdir)
     os.makedirs(output_dir, exist_ok=True)
 

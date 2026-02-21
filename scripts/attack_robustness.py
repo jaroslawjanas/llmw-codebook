@@ -493,7 +493,7 @@ def main() -> None:
     )
     run_dir_name = (
         f"attack_robustness_n{args.n}_u{args.u}"
-        f"_dist-{args.distance}_{args.codebook_generation}"
+        f"_dist-{args.distance}_c-{args.codebook_generation}"
         f"_budget-{budget_str}_{timestamp}"
     )
     run_save_dir = os.path.join(args.save_dir, run_dir_name)

@@ -73,7 +73,7 @@ def _build_cache_basename(args: argparse.Namespace) -> str:
     distance = args.distance.replace("-triton", "")
     parts = [
         "fpr_negatives",
-        args.codebook_generation,
+        f"c-{args.codebook_generation}",
         f"n{args.n}",
         f"u{args.u}",
         f"z{args.z}",
@@ -615,7 +615,7 @@ def main():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir_name = (
         f"tpr_at_fpr_n{args.n}_u{args.u}_z{args.z}"
-        f"_dist-{args.distance}_{args.codebook_generation}"
+        f"_dist-{args.distance}_c-{args.codebook_generation}"
         f"_fpr{args.fpr_target}_{timestamp}"
     )
     run_save_dir = os.path.join(args.save_dir, run_dir_name)

@@ -89,7 +89,7 @@ def _rng_chunk_worker(args: Tuple[int, int, int, str]) -> Tuple[int, np.ndarray]
 class RNGCodewordGenerator(CodewordGenerator):
     @property
     def algorithm_tag(self) -> str:
-        return "rng"
+        return "c-rng"
 
     def generate(self, *, workers: int, chunk_rows: Optional[int]) -> np.ndarray:
         table_size = 2 ** self.n
@@ -214,7 +214,7 @@ class BCHCodewordGenerator(CodewordGenerator):
     @property
     def algorithm_tag(self) -> str:
         m, k, _, _ = self._resolve_bch_parameters()
-        return f"bch_m{m}_k{k}"
+        return f"c-bch-m{m}-k{k}"
 
     def generate(self, *, workers: int, chunk_rows: Optional[int]) -> np.ndarray:
         resolved_m, resolved_k, padding, _ = self._resolve_bch_parameters()
@@ -310,7 +310,7 @@ class LinearCodeGenerator(CodewordGenerator):
 
     @property
     def algorithm_tag(self) -> str:
-        return "linear"
+        return "c-linear"
 
     def generate(self, *, workers: int, chunk_rows: Optional[int] = None) -> np.ndarray:
         table_size = 2 ** self.n

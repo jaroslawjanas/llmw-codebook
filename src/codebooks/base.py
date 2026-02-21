@@ -29,7 +29,7 @@ class CodebookBase:
     - File name format:
         codebook_{algorithm_tag}_n{n}_u{u}_sk-{secret_key}.npz
       Example:
-        codebook_rng_n24_u128_sk-25111915.npz
+        codebook_c-rng_n24_u128_sk-25111915.npz
 
     - NPZ contents:
         - packed_codes: uint8 array of shape (2^n, ceil(u/8))
