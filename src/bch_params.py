@@ -175,9 +175,9 @@ def _select_auto(n: int, u: int, allow_padding: bool) -> BCHParams:
 
     Strategy when allow_padding=True (BCH mode):
     1. Find all valid (m, n0, k) where k >= n
-    2. Prefer n0 <= u (padding case) to minimize unprotected bits
-    3. Among padding options, pick largest n0 (minimize padding)
-    4. If no n0 <= u, pick smallest n0 > u (minimize puncturing)
+    2. Prefer n0 > u (puncturing) to keep all bits BCH-protected
+    3. Among puncturing options, pick smallest n0 (minimize puncturing)
+    4. Fallback to n0 <= u (padding) only when no puncturing option exists
 
     Strategy when allow_padding=False (codebook generation):
     1. Find all valid (m, n0, k) where k >= n AND n0 >= u
@@ -208,12 +208,12 @@ def _select_auto(n: int, u: int, allow_padding: bool) -> BCHParams:
     padding_options = [(m, n0, k) for m, n0, k in viable if n0 <= u]
     puncturing_options = [(m, n0, k) for m, n0, k in viable if n0 > u]
 
-    if allow_padding and padding_options:
-        # Pick largest n0 <= u (minimize zero-padding)
-        best = max(padding_options, key=lambda x: x[1])
-    elif puncturing_options:
-        # Pick smallest n0 > u (minimize puncturing/truncation)
+    if puncturing_options:
+        # Pick smallest n0 > u (minimize puncturing, all bits BCH-protected)
         best = min(puncturing_options, key=lambda x: x[1])
+    elif allow_padding and padding_options:
+        # Fallback: largest n0 <= u (minimize unprotected zero-padding)
+        best = max(padding_options, key=lambda x: x[1])
     elif padding_options:
         # Only padding options available but padding not allowed
         raise ValueError(
