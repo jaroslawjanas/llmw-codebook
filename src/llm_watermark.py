@@ -199,11 +199,11 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
             model_kwargs["token"] = token
         
         # Load model with appropriate settings for the device
-        if self.device == "cuda":
+        if self.device.startswith("cuda"):
             self.model = AutoModelForCausalLM.from_pretrained(
-                self.model_name, 
+                self.model_name,
                 torch_dtype=torch.float16,  # Use float16 for memory efficiency
-                device_map="auto",
+                device_map=self.device,  # "cuda", "cuda:0", "cuda:1", etc.
                 **model_kwargs
             )
         else:
