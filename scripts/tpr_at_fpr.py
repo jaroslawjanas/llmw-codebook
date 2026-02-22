@@ -25,6 +25,11 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from scripts.utils import discover_experiments, load_and_merge
+from scripts.utils.parallel import (
+    create_bch_pool,
+    generate_negative_bit_errors_parallel,
+    resolve_workers,
+)
 from src.bch_codec import BCHCodec
 
 
@@ -51,6 +56,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--seed", type=int, default=42,
         help="Random seed (default: 42)"
+    )
+    parser.add_argument(
+        "--workers", type=int, default=0,
+        help="Number of parallel workers for negative generation (default: 0 = auto = cpu_count)"
     )
     args = parser.parse_args()
 
@@ -417,17 +426,17 @@ def main() -> None:
         print(f"  - {m}")
     print()
 
-    # Create BCH codec
-    bch_codec = BCHCodec(n=args.n, u=args.u, verbose=True)
+    # Phase 1: Generate negative bit errors (parallel)
+    workers = resolve_workers(args.workers)
+    print(f"Generating {args.z} random samples for FPR threshold ({workers} workers)...")
 
-    # Phase 1: Generate negative bit errors
-    print(f"Generating {args.z} random samples for FPR threshold...")
-
-    negative_bit_errors = generate_negative_bit_errors(
-        bch_codec=bch_codec,
-        z=args.z,
-        seed=args.seed,
-    )
+    with create_bch_pool(n=args.n, u=args.u, workers=workers) as pool:
+        negative_bit_errors = generate_negative_bit_errors_parallel(
+            pool=pool,
+            u=args.u,
+            z=args.z,
+            seed=args.seed,
+        )
 
     # Phase 2: Find FPR threshold
     threshold, actual_fpr = find_fpr_threshold(negative_bit_errors, args.fpr_target)

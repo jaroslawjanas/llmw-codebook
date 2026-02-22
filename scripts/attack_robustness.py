@@ -23,9 +23,14 @@ from tqdm import tqdm
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from scripts.tpr_at_fpr import find_fpr_threshold, generate_negative_bit_errors
+from scripts.tpr_at_fpr import find_fpr_threshold
 from scripts.utils import discover_experiments, load_and_merge
-from src.bch_codec import BCHCodec
+from scripts.utils.parallel import (
+    create_bch_pool,
+    evaluate_attack_robustness_parallel,
+    generate_negative_bit_errors_parallel,
+    resolve_workers,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -55,6 +60,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--seed", type=int, default=42,
         help="Random seed (default: 42)"
+    )
+    parser.add_argument(
+        "--workers", type=int, default=0,
+        help="Number of parallel workers (default: 0 = auto = cpu_count)"
     )
 
     args = parser.parse_args()
@@ -278,24 +287,21 @@ def create_model_plot(
     ]
 
     for attack_name, results, ax in attack_data:
-        budgets = list(results.keys())
-        # Convert to percentage
-        match_rates = [r * 100 for r in results.values()]
+        budgets = sorted(results.keys())
+        match_rates = [results[b] * 100 for b in budgets]
         baseline = match_rates[0] if budgets[0] == 0 else 100.0
 
         # Plot line (all points) but markers only for points after the first
         ax.plot(budgets, match_rates, '-', color='#4A90D9', linewidth=1.5)
-        # Add markers for all points except the first (which is shown by baseline)
         ax.plot(budgets[1:], match_rates[1:], 'o', color='#4A90D9', markersize=5)
 
-        # Green dashed baseline with label (positioned inside graph)
+        # Green dashed baseline
         ax.axhline(y=baseline, color='green', linestyle='--', linewidth=1.5, alpha=0.8)
         ax.text(budgets[-1] - 0.5, baseline - 4, f'{baseline:.1f}%',
                 color='green', fontsize=9, ha='right', va='top')
 
         # Add percentage labels for each point (skip first point - baseline shows it)
         for i, (x, y) in enumerate(zip(budgets[1:], match_rates[1:]), start=1):
-            # Offset label position to avoid overlap with line
             y_offset = 5 if y < 90 else -12
             ax.annotate(f'{y:.0f}%', (x, y), textcoords="offset points",
                         xytext=(0, y_offset), ha='center', fontsize=7, color='#333333')
@@ -305,8 +311,13 @@ def create_model_plot(
         ax.set_title(attack_name)
         ax.set_ylim(0, 100)
         ax.set_xlim(budgets[0], budgets[-1])
-        # Set x-axis ticks to show every integer
-        ax.set_xticks(budgets)
+        # Space out x-axis ticks to avoid overlap
+        max_ticks = 20
+        if len(budgets) > max_ticks:
+            step = len(budgets) // max_ticks + 1
+            ax.set_xticks(budgets[::step])
+        else:
+            ax.set_xticks(budgets)
         ax.grid(True, alpha=0.3)
 
     plt.suptitle(
@@ -327,57 +338,51 @@ def create_results_txt(
     all_results: dict[str, dict[str, dict[int, float]]],
     output_path: Path
 ) -> None:
-    """Write detailed results to text file."""
-    with open(output_path, "w") as f:
-        f.write("=" * 70 + "\n")
-        f.write("BCH Attack Robustness Analysis\n")
-        f.write("=" * 70 + "\n\n")
+    """Write formatted results with one table per attack type."""
+    lines = []
+    lines.append("=" * 70)
+    lines.append("BCH Attack Robustness Analysis")
+    lines.append("=" * 70)
+    lines.append("")
+    lines.append("Parameters:")
+    lines.append(f"  n (watermark bits): {args.n}")
+    lines.append(f"  u (codeword length): {args.u}")
+    lines.append(f"  max attack budget: {args.max_budget} bits")
+    lines.append(f"  z (negative samples): {args.z}")
+    lines.append(f"  target FPR: {args.fpr_target * 100:.2f}%")
+    lines.append(f"  bit_error threshold: {threshold}")
+    lines.append(f"  actual FPR: {actual_fpr * 100:.2f}%")
+    lines.append(f"  seed: {args.seed}")
+    lines.append("")
 
-        f.write("Parameters:\n")
-        f.write(f"  n (watermark bits): {args.n}\n")
-        f.write(f"  u (codeword length): {args.u}\n")
-        f.write(f"  max attack budget: {args.max_budget} bits\n")
-        f.write(f"  z (negative samples): {args.z}\n")
-        f.write(f"  target FPR: {args.fpr_target * 100:.2f}%\n")
-        f.write(f"  bit_error threshold: {threshold}\n")
-        f.write(f"  actual FPR: {actual_fpr * 100:.2f}%\n")
-        f.write(f"  seed: {args.seed}\n\n")
+    # Collect model short names and attack names
+    models = list(all_results.keys())
+    short_names = [shorten_model_name(m) for m in models]
+    model_col_width = max(len(s) for s in short_names) + 2
+    budget_col_width = 7
 
-        for model, attack_results in all_results.items():
-            f.write("-" * 70 + "\n")
-            f.write(f"Model: {model}\n")
-            f.write("-" * 70 + "\n\n")
+    attack_names = list(next(iter(all_results.values())).keys())
+    budgets = sorted(next(iter(next(iter(all_results.values())).values())).keys())
 
-            for attack_type, results in attack_results.items():
-                f.write(f"  {attack_type}:\n")
-                f.write(f"    TPR baseline (budget=0): {results[0]:.4f}\n")
-                f.write(f"    TPR final (budget={args.max_budget}): {results[args.max_budget]:.4f}\n")
+    for attack_name in attack_names:
+        lines.append(f"TPR (%) @ FPR={actual_fpr * 100:.2f}% — {attack_name}")
+        header = " " * model_col_width
+        header += "".join(f"{b:>{budget_col_width}}" for b in budgets)
+        lines.append(header)
+        lines.append("-" * len(header))
 
-                # Find 50% degradation point
-                baseline = results[0]
-                half_point = None
-                if baseline > 0:
-                    for budget, rate in results.items():
-                        if rate < baseline * 0.5:
-                            half_point = budget
-                            break
-                    if half_point:
-                        f.write(f"    50% TPR degradation at budget: {half_point}\n")
-                f.write("\n")
+        for model, short in zip(models, short_names):
+            results = all_results[model][attack_name]
+            row = f"{short:<{model_col_width}}"
+            row += "".join(f"{results[b] * 100:>{budget_col_width}.2f}" for b in budgets)
+            lines.append(row)
 
-        # Summary table
-        f.write("=" * 70 + "\n")
-        f.write("Summary Table\n")
-        f.write("=" * 70 + "\n\n")
+        lines.append("")
 
-        header = f"{'Model':<40} {'Attack':<15} {'TPR base':>10} {'TPR final':>10}\n"
-        f.write(header)
-        f.write("-" * 75 + "\n")
-
-        for model, attack_results in all_results.items():
-            short_model = shorten_model_name(model)
-            for attack_type, results in attack_results.items():
-                f.write(f"{short_model:<40} {attack_type:<15} {results[0]:>10.2%} {results[args.max_budget]:>10.2%}\n")
+    text = "\n".join(lines)
+    print(text)
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(text)
 
 
 def main() -> None:
@@ -404,67 +409,62 @@ def main() -> None:
         print(f"  - {m}")
     print()
 
-    # Create BCH codec
-    bch_codec = BCHCodec(n=args.n, u=args.u, verbose=True)
+    # Create worker pool (handles BCHCodec construction per worker)
+    workers = resolve_workers(args.workers)
+    print(f"Using {workers} parallel workers\n")
 
-    # Compute FPR threshold once
-    print(f"Generating {args.z} random samples for FPR threshold...")
-    negative_bit_errors = generate_negative_bit_errors(
-        bch_codec=bch_codec,
-        z=args.z,
-        seed=args.seed,
-    )
-    threshold, actual_fpr = find_fpr_threshold(negative_bit_errors, args.fpr_target)
-    print(f"FPR threshold: bit_errors <= {threshold}")
-    print(f"Actual FPR: {actual_fpr * 100:.2f}%\n")
-
-    # Create output directory
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = Path(__file__).parent.parent / "output" / (
-        f"attack_robustness_n{args.n}_u{args.u}_budget{args.max_budget}_{timestamp}"
-    )
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Process each model
-    all_results = {}
-
-    for model in models:
-        print(f"\nProcessing {shorten_model_name(model)}...")
-        model_paths = matching[matching["model"] == model]["path"].tolist()
-        df = load_and_merge(model_paths)
-        print(f"  Loaded {len(df)} samples")
-
-        attack_results = {}
-
-        # Substitution attack
-        attack_results["Substitution"] = evaluate_attack_robustness(
-            df, bch_codec, apply_substitution_attack, args.max_budget, threshold, args.seed, "Substitution"
+    with create_bch_pool(n=args.n, u=args.u, workers=workers) as pool:
+        # Compute FPR threshold once
+        print(f"Generating {args.z} random samples for FPR threshold...")
+        negative_bit_errors = generate_negative_bit_errors_parallel(
+            pool=pool,
+            u=args.u,
+            z=args.z,
+            seed=args.seed,
         )
+        threshold, actual_fpr = find_fpr_threshold(negative_bit_errors, args.fpr_target)
+        print(f"FPR threshold: bit_errors <= {threshold}")
+        print(f"Actual FPR: {actual_fpr * 100:.2f}%\n")
 
-        # Insertion attack
-        attack_results["Insertion"] = evaluate_attack_robustness(
-            df, bch_codec, apply_insertion_attack, args.max_budget, threshold, args.seed, "Insertion"
+        # Create output directory
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_dir = Path(__file__).parent.parent / "output" / (
+            f"attack_robustness_n{args.n}_u{args.u}_budget{args.max_budget}_{timestamp}"
         )
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Deletion attack
-        attack_results["Deletion"] = evaluate_attack_robustness(
-            df, bch_codec, apply_deletion_attack, args.max_budget, threshold, args.seed, "Deletion"
-        )
+        # Process each model
+        all_results = {}
 
-        all_results[model] = attack_results
+        for model in models:
+            print(f"\nProcessing {shorten_model_name(model)}...")
+            model_paths = matching[matching["model"] == model]["path"].tolist()
+            df = load_and_merge(model_paths)
+            print(f"  Loaded {len(df)} samples")
 
-        # Create per-model plot
-        short_model = model.replace("/", "_")
-        create_model_plot(
-            model=model,
-            substitution_results=attack_results["Substitution"],
-            insertion_results=attack_results["Insertion"],
-            deletion_results=attack_results["Deletion"],
-            actual_fpr=actual_fpr,
-            args=args,
-            output_path=output_dir / f"{short_model}_robustness.png"
-        )
-        print(f"  Saved plot: {short_model}_robustness.png")
+            attack_results = evaluate_attack_robustness_parallel(
+                pool=pool,
+                df=df,
+                attack_names=["Substitution", "Insertion", "Deletion"],
+                max_budget=args.max_budget,
+                threshold=threshold,
+                seed=args.seed,
+            )
+
+            all_results[model] = attack_results
+
+            # Create per-model plot
+            short_model = model.replace("/", "_")
+            create_model_plot(
+                model=model,
+                substitution_results=attack_results["Substitution"],
+                insertion_results=attack_results["Insertion"],
+                deletion_results=attack_results["Deletion"],
+                actual_fpr=actual_fpr,
+                args=args,
+                output_path=output_dir / f"{short_model}_robustness.png"
+            )
+            print(f"  Saved plot: {short_model}_robustness.png")
 
     # Create summary results file
     create_results_txt(args, threshold, actual_fpr, all_results, output_dir / "results.txt")
