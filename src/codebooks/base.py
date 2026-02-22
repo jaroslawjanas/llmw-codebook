@@ -118,7 +118,7 @@ class CodebookBase:
 
     def _build_filename_base(self) -> str:
         # Use hyphen for the secret-key portion as requested
-        return f"codebook_{self.generator.algorithm_tag}_n{self.n}_u{self.u}_sk-{self.secret_key}"
+        return f"codebook_c-{self.generator.algorithm_tag}_n{self.n}_u{self.u}_sk-{self.secret_key}"
 
     def _cache_exists(self) -> bool:
         return os.path.exists(self.npz_path)
