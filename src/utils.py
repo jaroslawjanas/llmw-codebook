@@ -1,7 +1,7 @@
 import os
 import sys
 import random
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 from datasets import load_dataset
 import src.paths as paths
 
@@ -21,18 +21,18 @@ def get_shuffled_essays(
     dataset_split: str,
     dataset_column: str,
     seed: int,
-    n_prompts: int
+    n_prompts: Optional[int] = None
 ) -> List[str]:
     """
     Get a shuffled list of prompts from a specified Hugging Face dataset, subset, split, and column.
-    
+
     Args:
         dataset_name: The name of the Hugging Face dataset (e.g., "ChristophSchuhmann/essays-with-instructions").
         dataset_subset: The name of the dataset subset (e.g., "default").
         dataset_split: The name of the dataset split (e.g., "train", "validation", "test").
         dataset_column: The name of the column in the dataset to extract prompts from (e.g., "text" or "instructions").
         seed: Random seed for reproducibility.
-        n_prompts: Number of prompts to return.
+        n_prompts: Number of prompts to return. If None, return all prompts.
         
     Returns:
         List of prompt texts (shuffled deterministically based on seed).
@@ -61,9 +61,10 @@ def get_shuffled_essays(
                          f"Available splits: {list(dataset.keys())}")
         
     total_prompts_in_dataset = len(dataset[dataset_split])
-    
-    # Check if we have enough prompts
-    if n_prompts > total_prompts_in_dataset:
+
+    if n_prompts is None:
+        n_prompts = total_prompts_in_dataset
+    elif n_prompts > total_prompts_in_dataset:
         raise ValueError(f"Requested {n_prompts} prompts but dataset '{dataset_name}' "
                          f"({dataset_subset} subset, {dataset_split} split) only contains {total_prompts_in_dataset} entries.")
     
