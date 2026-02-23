@@ -154,18 +154,16 @@ _BCH: Any = None
 _BCH_k: Optional[int] = None
 _BCH_watermark_bits: Optional[int] = None
 _BCH_u: Optional[int] = None
-_BCH_padding: int = 0
 _BCH_secret_key: str = ""
 
 
-def _bch_pool_init(n: int, u: int, m: int, k: int, padding: int, secret_key: str) -> None:
-    global _BCH, _BCH_k, _BCH_watermark_bits, _BCH_u, _BCH_padding, _BCH_secret_key
+def _bch_pool_init(n: int, u: int, m: int, k: int, secret_key: str) -> None:
+    global _BCH, _BCH_k, _BCH_watermark_bits, _BCH_u, _BCH_secret_key
 
     import galois  # type: ignore
 
     _BCH_watermark_bits = int(n)
     _BCH_u = int(u)
-    _BCH_padding = int(padding)
     _BCH_secret_key = secret_key
 
     n0 = (2**m) - 1
@@ -174,7 +172,7 @@ def _bch_pool_init(n: int, u: int, m: int, k: int, padding: int, secret_key: str
 
 
 def _bch_chunk_worker(args: Tuple[int, int]) -> Tuple[int, np.ndarray]:
-    global _BCH, _BCH_k, _BCH_watermark_bits, _BCH_u, _BCH_padding, _BCH_secret_key
+    global _BCH, _BCH_k, _BCH_watermark_bits, _BCH_u, _BCH_secret_key
     start, end = args
     if (
         _BCH is None
@@ -196,13 +194,7 @@ def _bch_chunk_worker(args: Tuple[int, int]) -> Tuple[int, np.ndarray]:
             msg[_BCH_watermark_bits:] = pad_rng.integers(0, 2, size=_BCH_k - _BCH_watermark_bits, dtype=np.uint8)
 
         cw_full = np.array(_BCH.encode(msg), dtype=np.uint8)
-        if _BCH_padding > 0:
-            cw_u = np.zeros(_BCH_u, dtype=np.uint8)
-            cw_u[:len(cw_full)] = cw_full
-        else:
-            cw_u = cw_full[:_BCH_u]
-
-        bits[offset] = cw_u
+        bits[offset] = cw_full[:_BCH_u]
 
     return start, bits
 
@@ -217,7 +209,7 @@ class BCHCodewordGenerator(CodewordGenerator):
         return f"bch_m{m}_k{k}"
 
     def generate(self, *, workers: int, chunk_rows: Optional[int]) -> np.ndarray:
-        resolved_m, resolved_k, padding, _ = self._resolve_bch_parameters()
+        resolved_m, resolved_k, _, _ = self._resolve_bch_parameters()
         table_size = 2 ** self.n
         bytes_per_code = (self.u + 7) // 8
         chunk_rows = chunk_rows or self._default_chunk_rows()
@@ -229,7 +221,7 @@ class BCHCodewordGenerator(CodewordGenerator):
         with Pool(
             processes=workers,
             initializer=_bch_pool_init,
-            initargs=(self.n, self.u, resolved_m, resolved_k, padding, self.secret_key),
+            initargs=(self.n, self.u, resolved_m, resolved_k, self.secret_key),
         ) as pool:
             for start, chunk_bits in tqdm(
                 pool.imap_unordered(_bch_chunk_worker, chunks, chunksize=1),
@@ -259,9 +251,13 @@ class BCHCodewordGenerator(CodewordGenerator):
                     f"No valid BCH code for m={m} (n0={n0}) with k >= {self.n}. "
                     f"Try a larger --bch-m."
                 )
-            padding = max(0, self.u - n0)
-            puncturing = max(0, n0 - self.u)
-            return m, k, padding, puncturing
+            if n0 < self.u:
+                raise ValueError(
+                    f"BCH code with m={m} (n0={n0}) is shorter than u={self.u}. "
+                    f"Use a larger --bch-m to avoid padding."
+                )
+            puncturing = n0 - self.u
+            return m, k, 0, puncturing
 
         # Auto-select: find all viable (m, n0, k)
         viable = []
@@ -277,18 +273,22 @@ class BCHCodewordGenerator(CodewordGenerator):
                 f"Specify --bch-m manually for m > 9."
             )
 
-        # Prefer largest n0 <= u (minimize padding), else smallest n0 > u (minimize puncturing)
-        padding_opts = [(m, n0, k) for m, n0, k in viable if n0 <= self.u]
+        # Prefer: exact match > puncturing (all bits BCH-protected) > error
+        exact_opts = [(m, n0, k) for m, n0, k in viable if n0 == self.u]
         puncturing_opts = [(m, n0, k) for m, n0, k in viable if n0 > self.u]
 
-        if padding_opts:
-            m, n0, k = max(padding_opts, key=lambda x: x[1])
-        else:
+        if exact_opts:
+            m, n0, k = exact_opts[0]
+        elif puncturing_opts:
             m, n0, k = min(puncturing_opts, key=lambda x: x[1])
+        else:
+            raise ValueError(
+                f"No BCH code with n0 >= u={self.u} found for n={self.n}. "
+                f"Specify --bch-m manually."
+            )
 
-        padding = max(0, self.u - n0)
-        puncturing = max(0, n0 - self.u)
-        return m, k, padding, puncturing
+        puncturing = n0 - self.u
+        return m, k, 0, puncturing
 
 
 # ---------------------------------------------------------------------------
