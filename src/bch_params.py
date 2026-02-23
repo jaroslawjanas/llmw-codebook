@@ -175,13 +175,12 @@ def _select_auto(n: int, u: int, allow_padding: bool) -> BCHParams:
 
     Strategy when allow_padding=True (BCH mode):
     1. Find all valid (m, n0, k) where k >= n
-    2. Prefer n0 > u (puncturing) to keep all bits BCH-protected
-    3. Among puncturing options, pick smallest n0 (minimize puncturing)
-    4. Fallback to n0 <= u (padding) only when no puncturing option exists
+    2. Prefer exact match (n0 == u), then puncturing (smallest n0 > u)
+    3. Fallback to n0 < u (padding) only when no exact or puncturing option exists
 
     Strategy when allow_padding=False (codebook generation):
     1. Find all valid (m, n0, k) where k >= n AND n0 >= u
-    2. Pick smallest n0 >= u (minimize puncturing/truncation)
+    2. Prefer exact match (n0 == u), then smallest n0 > u (minimize puncturing)
     """
     # Validate within lookup table range (m=3..9 covers n0 up to 511)
     if n > 500 or u > 500:
@@ -204,15 +203,18 @@ def _select_auto(n: int, u: int, allow_padding: bool) -> BCHParams:
             f"This is unexpected for reasonable n values."
         )
 
-    # Separate into padding (n0 <= u) and puncturing/truncation (n0 > u) options
-    padding_options = [(m, n0, k) for m, n0, k in viable if n0 <= u]
+    # Prefer: exact match > puncturing (all bits BCH-protected) > padding fallback
+    exact_options = [(m, n0, k) for m, n0, k in viable if n0 == u]
     puncturing_options = [(m, n0, k) for m, n0, k in viable if n0 > u]
+    padding_options = [(m, n0, k) for m, n0, k in viable if n0 < u]
 
-    if puncturing_options:
+    if exact_options:
+        best = exact_options[0]
+    elif puncturing_options:
         # Pick smallest n0 > u (minimize puncturing, all bits BCH-protected)
         best = min(puncturing_options, key=lambda x: x[1])
     elif allow_padding and padding_options:
-        # Fallback: largest n0 <= u (minimize unprotected zero-padding)
+        # Fallback: largest n0 < u (minimize unprotected zero-padding)
         best = max(padding_options, key=lambda x: x[1])
     elif padding_options:
         # Only padding options available but padding not allowed
