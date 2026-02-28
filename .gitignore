@@ -30,3 +30,6 @@ hf_token
 
 # VSCode
 .vscode/
+
+# Paper
+paper/
