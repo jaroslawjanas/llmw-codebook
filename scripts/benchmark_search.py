@@ -56,6 +56,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
     parser.add_argument("--batch-size", type=int, default=None, help="Batch size for search (default: all z at once)")
     parser.add_argument("--warmup", type=int, default=1, help="Number of warmup queries before timing (default: 1)")
+    parser.add_argument("--faiss-threads", type=int, default=1, help="Number of OpenMP threads for Faiss (default: 1)")
 
     # Output
     parser.add_argument("--save-dir", type=str, default="output", help="Directory to save benchmark results (default: output)")
@@ -157,6 +158,8 @@ def write_results(args: argparse.Namespace, results: dict, save_path: str) -> No
     lines.append(f"  seed: {args.seed}")
     lines.append(f"  batch size: {results['batch_size']}")
     lines.append(f"  warmup queries: {args.warmup}")
+    if args.distance == "hamming":
+        lines.append(f"  faiss threads: {args.faiss_threads}")
     lines.append("")
     lines.append("-" * 60)
     lines.append("Results:")
@@ -200,6 +203,8 @@ def main() -> None:
     )
 
     if args.distance == "hamming":
+        import faiss
+        faiss.omp_set_num_threads(args.faiss_threads)
         codebook = CodebookHamming(base_codebook)
     elif args.distance == "levenshtein-triton":
         codebook = CodebookLevenshteinTriton(base_codebook)
