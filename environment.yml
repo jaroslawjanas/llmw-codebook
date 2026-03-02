@@ -7,7 +7,7 @@ channels:
 dependencies:
   - python=3.10
   - pytorch::pytorch=2.5.1
-  - pytorch::pytorch-cuda=11.8 # 12.4
+  - pytorch::pytorch-cuda=12.4
   - transformers=4.51.3
   - datasets=3.6.0
   - tqdm=4.67.1
@@ -28,5 +28,5 @@ dependencies:
     - faiss-cpu>=1.12.0
     - galois==0.4.6
     # Triton (--distance levenshtein-triton): uncomment ONE line for your platform
-    - triton-windows>=3.0.0  # Windows
-    # - triton>=3.0.0  # Linux (if libcuda.so missing: ln -s libcuda.so.1 libcuda.so)Sta
+    # - triton-windows>=3.0.0  # Windows
+    - triton>=3.0.0  # Linux (if libcuda.so missing: ln -s libcuda.so.1 libcuda.so)Sta
