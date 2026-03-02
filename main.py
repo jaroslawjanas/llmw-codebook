@@ -78,7 +78,7 @@ def main():
     parser.add_argument("--u", type=int, default=100, help="Size of the codes")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--secret-key", type=str, default="25111915", help="Secret key used for watermarking and codebook generation (string)")
-    parser.add_argument("--codeword-generation", type=str, choices=["rng", "bch", "linear"], default="rng", help="Codeword generation strategy for base codebook: 'rng' (random baseline), 'bch' (BCH-based), or 'linear' (random linear code)")
+    parser.add_argument("--codeword-generation", type=str, choices=["rng", "bch", "linear"], default="linear", help="Codeword generation strategy for base codebook: 'rng' (random baseline), 'bch' (BCH-based), or 'linear' (random linear code)")
     parser.add_argument("--distance", type=str, choices=["hamming", "levenshtein", "levenshtein-triton"], default="hamming", help="Distance metric for codebook search")
     parser.add_argument("--bch-m", type=int, default=None, help="BCH field degree m (n0=2^m-1). If None, auto-select optimal")
     parser.add_argument("--prompt", type=str, help="Custom prompt (uses random essay from dataset if not provided)")

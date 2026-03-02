@@ -82,7 +82,7 @@ def parse_args() -> argparse.Namespace:
     )
 
     # Codebook parameters
-    parser.add_argument("--codebook-generation", type=str, default="rng", choices=["rng", "bch", "linear"], help="Codeword generation algorithm (default: rng)")
+    parser.add_argument("--codebook-generation", type=str, default="linear", choices=["rng", "bch", "linear"], help="Codeword generation algorithm (default: linear)")
     parser.add_argument("--secret-key", type=str, default="25111915", help="Codebook secret key (default: 25111915)")
     parser.add_argument("--bch-m", type=int, default=None, help="BCH field degree m (n0=2^m-1). If None, auto-select optimal")
 

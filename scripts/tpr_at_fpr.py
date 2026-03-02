@@ -544,7 +544,7 @@ def main():
     parser.add_argument("--distance", type=str, required=True, choices=["hamming", "levenshtein", "levenshtein-triton"], help="Distance metric")
 
     # Optional
-    parser.add_argument("--codebook-generation", type=str, default="rng", choices=["rng", "bch", "linear"], help="Codeword generation algorithm (default: rng)")
+    parser.add_argument("--codebook-generation", type=str, default="linear", choices=["rng", "bch", "linear"], help="Codeword generation algorithm (default: linear)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for negative generation (default: 42)")
     parser.add_argument("--z", type=int, required=True, help="Number of random negative samples")
     parser.add_argument("--fpr-target", type=float, default=0.01, help="Target FPR (default: 0.01)")
