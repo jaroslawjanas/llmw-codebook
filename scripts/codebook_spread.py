@@ -193,7 +193,7 @@ def save_results(
 
     plt.tight_layout()
     plot_path = os.path.join(output_dir, "spread.png")
-    fig.savefig(plot_path, dpi=150)
+    fig.savefig(plot_path, dpi=300)
     plt.close(fig)
     print(f"\nHistogram saved to: {plot_path}")
 
