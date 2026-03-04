@@ -599,7 +599,7 @@ def main():
             "k": bch_codec.params.k,
             "t": bch_codec.params.t,
             "padding": bch_codec.params.padding,
-            "puncturing": bch_codec.params.puncturing,
+            "shortening": bch_codec.params.shortening,
         },
         "generation": {
             "max_tokens_requested": args.max_tokens,

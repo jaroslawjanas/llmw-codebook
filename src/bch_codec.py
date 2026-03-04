@@ -1,9 +1,9 @@
 """
-BCH encoder/decoder with support for padding and puncturing.
+BCH encoder/decoder with support for padding and shortening.
 
 Provides a codec that can encode/decode watermarks of arbitrary length to/from
 codewords of arbitrary length, using BCH error correction with automatic
-padding (for u > n0) or puncturing (for u < n0).
+padding (for u > n0) or shortening (for u < n0).
 """
 
 from __future__ import annotations
@@ -36,9 +36,10 @@ class BCHCodec:
        - Padding bits are not protected by BCH error correction.
        - Decoder strips padding before BCH decoding.
 
-    2. PUNCTURING (u < n0): Remove bits from the end to reach length u.
-       - Reduces effective error correction capability.
-       - Decoder inserts zeros at punctured positions before BCH decoding.
+    2. SHORTENING (u < n0): Use larger k = n + (n0 - u), pad message with
+       known zeros, encode, then remove those known-zero message positions.
+       - Error correction capability is fully preserved.
+       - Decoder inserts the known zeros back before BCH decoding.
 
     Attributes:
         n: Watermark/message length in bits (supports 2^n unique identities)
@@ -82,12 +83,12 @@ class BCHCodec:
 
     @property
     def codeword_length(self) -> int:
-        """Output codeword length in bits (after padding/puncturing)."""
+        """Output codeword length in bits (after padding/shortening)."""
         return self.u
 
     @property
     def error_correction_capability(self) -> int:
-        """Number of bit errors BCH can correct (before puncturing penalty)."""
+        """Number of bit errors BCH can correct."""
         return self.params.t
 
     @property
@@ -100,40 +101,46 @@ class BCHCodec:
         Encode a message into a BCH codeword of exactly u bits.
 
         Encoding process:
-        1. Pad message from n bits to k bits (BCH message length)
-        2. Apply BCH encoding to get n0 bits
-        3. Apply padding (u > n0) or puncturing (u < n0) to get u bits
+        1. Pad message from n bits to k bits (BCH message length, zeros at [n:k])
+        2. Apply BCH encoding to get n0 bits (systematic: [k message | n0-k parity])
+        3. Apply shortening (remove known-zero positions [n:k]) and/or padding to get u bits
 
         Args:
             message: Binary array of length n (watermark bits)
 
         Returns:
-            Binary array of length u (codeword with padding/puncturing applied)
+            Binary array of length u (codeword with shortening/padding applied)
         """
         msg_arr = self._validate_binary_input(message, self.n, "message")
 
-        # Pad message to k bits (BCH message length)
+        # Pad message to k bits (BCH message length, zeros at positions [n:k])
         if self.params.k > self.n:
             padded_msg = np.zeros(self.params.k, dtype=np.uint8)
             padded_msg[:self.n] = msg_arr
         else:
             padded_msg = msg_arr
 
-        # BCH encode
+        # BCH encode (systematic: [k message bits | n0-k parity bits])
         gf_msg = self._GF2(padded_msg)
         gf_codeword = self._bch.encode(gf_msg)
         codeword = np.array(gf_codeword, dtype=np.uint8)
 
-        # Apply padding or puncturing to get exactly u bits
-        if self.params.padding > 0:
-            # Append zeros
+        # Apply shortening and/or padding to get exactly u bits
+        if self.params.shortening > 0:
+            # Remove known-zero message positions [n:k], keep payload + parity
+            shortened = np.concatenate([codeword[:self.n], codeword[self.params.k:]])
+            if self.params.padding > 0:
+                # Residual padding (shortened code shorter than u)
+                output = np.zeros(self.u, dtype=np.uint8)
+                output[:len(shortened)] = shortened
+            else:
+                output = shortened
+        elif self.params.padding > 0:
+            # Pure padding (n0 < u, no shortening)
             output = np.zeros(self.u, dtype=np.uint8)
             output[:self.params.n0] = codeword
-        elif self.params.puncturing > 0:
-            # Remove last bits
-            output = codeword[:self.u]
         else:
-            # Perfect fit
+            # Perfect fit (n0 == u)
             output = codeword
 
         return output
@@ -143,8 +150,8 @@ class BCHCodec:
         Decode a BCH codeword back to the original message.
 
         Decoding process:
-        1. Undo padding (strip zeros) or puncturing (insert erasure markers)
-           to recover the n0-bit native BCH codeword
+        1. Undo shortening (insert known zeros at message positions [n:k])
+           and/or strip padding to recover the n0-bit native BCH codeword
         2. Apply BCH syndrome decoding to correct errors
         3. Extract the first n bits as the recovered message
 
@@ -159,16 +166,23 @@ class BCHCodec:
         """
         cw_arr = self._validate_binary_input(codeword, self.u, "codeword")
 
-        # Undo padding or puncturing to get n0-bit codeword
-        if self.params.padding > 0:
-            # Strip padding zeros
-            native_cw = cw_arr[:self.params.n0]
-        elif self.params.puncturing > 0:
-            # Insert erasures (zeros) at punctured positions
-            # BCH will treat these as potential error locations
+        # Reconstruct n0-bit native codeword by undoing shortening/padding
+        if self.params.shortening > 0:
+            # Strip residual padding if present
+            if self.params.padding > 0:
+                received = cw_arr[:self.u - self.params.padding]
+            else:
+                received = cw_arr
+            # Insert known zeros at shortened message positions [n:k]
             native_cw = np.zeros(self.params.n0, dtype=np.uint8)
-            native_cw[:self.u] = cw_arr
+            native_cw[:self.n] = received[:self.n]            # payload bits
+            # positions [n:k] stay zero (shortened known-zero bits)
+            native_cw[self.params.k:] = received[self.n:]     # parity bits
+        elif self.params.padding > 0:
+            # Strip padding zeros (pure padding, n0 < u)
+            native_cw = cw_arr[:self.params.n0]
         else:
+            # Perfect fit
             native_cw = cw_arr
 
         # BCH decode
@@ -192,9 +206,12 @@ class BCHCodec:
             # Calculate bit errors by re-encoding and comparing
             corrected_cw = np.array(self._bch.encode(self._GF2(msg_for_reencoding)), dtype=np.uint8)
 
-            # Compare only the non-punctured portion
-            if self.params.puncturing > 0:
-                bit_errors = int(np.sum(native_cw[:self.u] != corrected_cw[:self.u]))
+            # Compare only the transmitted portion (exclude shortened positions)
+            if self.params.shortening > 0:
+                # Compare payload and parity portions separately (skip shortened zeros)
+                payload_errors = int(np.sum(native_cw[:self.n] != corrected_cw[:self.n]))
+                parity_errors = int(np.sum(native_cw[self.params.k:] != corrected_cw[self.params.k:]))
+                bit_errors = payload_errors + parity_errors
             else:
                 bit_errors = int(np.sum(native_cw != corrected_cw))
 

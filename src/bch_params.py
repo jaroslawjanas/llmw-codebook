@@ -35,29 +35,31 @@ class BCHParams:
         m: Field degree. The native BCH codeword length is n0 = 2^m - 1.
            Valid range: 3 to 9 (n0 from 7 to 511).
         n0: Native BCH codeword length (n0 = 2^m - 1). This is the length
-            of the BCH codeword BEFORE padding/puncturing.
+            of the BCH codeword BEFORE padding/shortening.
         k: Message (information) length. The number of data bits the BCH code
             can protect. Must be >= the watermark size n.
         t: Error correction capability. The BCH code can correct up to t bit
             errors in the received codeword. This is set by BCHCodec after
             creating the galois.BCH instance (not from the lookup table).
-        padding: Number of zero bits appended when u > n0.
+        padding: Number of zero bits appended to reach length u.
                  These padding bits are unprotected by BCH error correction.
-        puncturing: Number of bits removed when u < n0.
-                    Puncturing reduces error correction capability since these
-                    positions become erasures at the decoder.
+                 Used when n0 < u, or as residual after shortening.
+        shortening: Number of known-zero message bits NOT transmitted when n0 > u.
+                    In systematic encoding, these are message positions [n:k] set
+                    to zero. Both encoder and decoder know these values, so error
+                    correction capability is fully preserved (unlike puncturing).
     """
     m: int
     n0: int
     k: int
     t: int
     padding: int
-    puncturing: int
+    shortening: int
 
     @property
     def is_perfect_fit(self) -> bool:
-        """True if no padding or puncturing needed."""
-        return self.padding == 0 and self.puncturing == 0
+        """True if no padding or shortening needed."""
+        return self.padding == 0 and self.shortening == 0
 
 
 def get_valid_k_values(n0: int) -> list[int]:
@@ -155,18 +157,32 @@ def _select_manual_m(n: int, u: int, m: int, allow_padding: bool) -> BCHParams:
             f"Increase --bch-m to get n0 >= u."
         )
 
-    k = find_smallest_k(n0, min_k=n)
-    if k is None:
-        raise ValueError(
-            f"No valid BCH code for m={m} (n0={n0}) with k >= {n}. "
-            f"Increase --bch-m."
-        )
-
-    padding = max(0, u - n0)
-    puncturing = max(0, n0 - u)
+    if n0 > u:
+        # Shortening: need k >= n + (n0 - u) so that removing (k-n) known-zero
+        # message bits produces a codeword of length <= u
+        min_k = n + (n0 - u)
+        k = find_smallest_k(n0, min_k=min_k)
+        if k is None:
+            raise ValueError(
+                f"No valid BCH code for m={m} (n0={n0}) with k >= {min_k} "
+                f"(needed for shortening to u={u}). Try a different --bch-m."
+            )
+        shortening = k - n
+        # Residual padding if shortened code is shorter than u
+        effective_length = n0 - shortening
+        padding = max(0, u - effective_length)
+    else:
+        k = find_smallest_k(n0, min_k=n)
+        if k is None:
+            raise ValueError(
+                f"No valid BCH code for m={m} (n0={n0}) with k >= {n}. "
+                f"Increase --bch-m."
+            )
+        shortening = 0
+        padding = max(0, u - n0)
 
     # t=0 is a placeholder; actual t is set by BCHCodec
-    return BCHParams(m=m, n0=n0, k=k, t=0, padding=padding, puncturing=puncturing)
+    return BCHParams(m=m, n0=n0, k=k, t=0, padding=padding, shortening=shortening)
 
 
 def _select_auto(n: int, u: int, allow_padding: bool) -> BCHParams:
@@ -174,13 +190,17 @@ def _select_auto(n: int, u: int, allow_padding: bool) -> BCHParams:
     Fully automatic BCH parameter selection.
 
     Strategy when allow_padding=True (BCH mode):
-    1. Find all valid (m, n0, k) where k >= n
-    2. Prefer exact match (n0 == u), then puncturing (smallest n0 > u)
-    3. Fallback to n0 < u (padding) only when no exact or puncturing option exists
+    1. Find all valid (m, n0, k) candidates
+    2. Prefer exact match (n0 == u), then shortening (smallest n0 > u)
+    3. Fallback to n0 < u (padding) only when no exact or shortening option exists
 
     Strategy when allow_padding=False (codebook generation):
-    1. Find all valid (m, n0, k) where k >= n AND n0 >= u
-    2. Prefer exact match (n0 == u), then smallest n0 > u (minimize puncturing)
+    1. Find all valid (m, n0, k) where n0 >= u
+    2. Prefer exact match (n0 == u), then smallest n0 > u (minimize shortening)
+
+    For shortening (n0 > u): k is chosen so that removing (k-n) known-zero
+    message bits produces the right output length. This preserves full error
+    correction capability, unlike puncturing.
     """
     # Validate within lookup table range (m=3..9 covers n0 up to 511)
     if n > 500 or u > 500:
@@ -189,51 +209,57 @@ def _select_auto(n: int, u: int, allow_padding: bool) -> BCHParams:
             f"Got n={n}, u={u}. Please specify --bch-m manually."
         )
 
-    viable: list[tuple[int, int, int]] = []  # (m, n0, k)
+    # Build viable candidates with appropriate k for each case
+    exact: list[tuple[int, int, int]] = []       # (m, n0, k)
+    shortening: list[tuple[int, int, int]] = []   # (m, n0, k) for n0 > u
+    padding_opts: list[tuple[int, int, int]] = [] # (m, n0, k) for n0 < u
 
     for m_candidate in sorted(BCH_VALID_K.keys()):
         n0 = 2**m_candidate - 1
-        k = find_smallest_k(n0, min_k=n)
-        if k is not None:
-            viable.append((m_candidate, n0, k))
 
-    if not viable:
-        raise ValueError(
-            f"No valid BCH code found for message length n={n}. "
-            f"This is unexpected for reasonable n values."
-        )
+        if n0 == u:
+            k = find_smallest_k(n0, min_k=n)
+            if k is not None:
+                exact.append((m_candidate, n0, k))
+        elif n0 > u:
+            # For shortening: need k >= n + (n0 - u)
+            min_k = n + (n0 - u)
+            k = find_smallest_k(n0, min_k=min_k)
+            if k is not None:
+                shortening.append((m_candidate, n0, k))
+        else:
+            k = find_smallest_k(n0, min_k=n)
+            if k is not None:
+                padding_opts.append((m_candidate, n0, k))
 
-    # Prefer: exact match > puncturing (all bits BCH-protected) > padding fallback
-    exact_options = [(m, n0, k) for m, n0, k in viable if n0 == u]
-    puncturing_options = [(m, n0, k) for m, n0, k in viable if n0 > u]
-    padding_options = [(m, n0, k) for m, n0, k in viable if n0 < u]
-
-    if exact_options:
-        best = exact_options[0]
-    elif puncturing_options:
-        # Pick smallest n0 > u (minimize puncturing, all bits BCH-protected)
-        best = min(puncturing_options, key=lambda x: x[1])
-    elif allow_padding and padding_options:
+    # Prefer: exact match > shortening (error correction preserved) > padding fallback
+    if exact:
+        best_m, best_n0, best_k = exact[0]
+        short = 0
+        pad = 0
+    elif shortening:
+        # Pick smallest n0 > u (minimize shortening amount)
+        best_m, best_n0, best_k = min(shortening, key=lambda x: x[1])
+        short = best_k - n
+        effective_length = best_n0 - short
+        pad = max(0, u - effective_length)
+    elif allow_padding and padding_opts:
         # Fallback: largest n0 < u (minimize unprotected zero-padding)
-        best = max(padding_options, key=lambda x: x[1])
-    elif padding_options:
-        # Only padding options available but padding not allowed
+        best_m, best_n0, best_k = max(padding_opts, key=lambda x: x[1])
+        short = 0
+        pad = u - best_n0
+    elif padding_opts:
         raise ValueError(
             f"No BCH code with n0 >= u={u} found for n={n}. "
             f"All viable codes have n0 < u, which requires padding."
         )
     else:
         raise ValueError(
-            f"No viable BCH configuration for n={n}, u={u}. "
-            f"This should not happen."
+            f"No viable BCH configuration for n={n}, u={u}."
         )
 
-    m, n0, k = best
-    padding = max(0, u - n0)
-    puncturing = max(0, n0 - u)
-
     # t=0 is a placeholder; actual t is set by BCHCodec
-    return BCHParams(m=m, n0=n0, k=k, t=0, padding=padding, puncturing=puncturing)
+    return BCHParams(m=best_m, n0=best_n0, k=best_k, t=0, padding=pad, shortening=short)
 
 
 def print_bch_warnings(n: int, u: int, params: BCHParams) -> None:
@@ -253,29 +279,25 @@ def print_bch_warnings(n: int, u: int, params: BCHParams) -> None:
             f"Consider --u {params.n0} for exact BCH match."
         )
 
-    if params.puncturing > 0:
+    if params.shortening > 0:
         warnings.append(
-            f"Puncturing {params.puncturing} bits (reduced error correction). "
+            f"Shortening {params.shortening} bits "
+            f"(error correction fully preserved). "
             f"Consider --u {params.n0} for exact BCH match."
         )
 
-    if params.k > n:
-        warnings.append(
-            f"Message uses {n}/{params.k} available bits. "
-            f"Consider --n {params.k} for full message capacity."
-        )
-
     for w in warnings:
-        print(f"Warning: {w}")
+        print(f"Note: {w}")
 
 
 def format_bch_summary(params: BCHParams, n: int) -> str:
     """Format a summary string for the BCH configuration."""
-    action = ""
+    actions = []
+    if params.shortening > 0:
+        actions.append(f"shortening {params.shortening} bits")
     if params.padding > 0:
-        action = f", padding {params.padding} zeros"
-    elif params.puncturing > 0:
-        action = f", puncturing {params.puncturing} bits"
+        actions.append(f"padding {params.padding} zeros")
+    action = ", " + ", ".join(actions) if actions else ""
 
     return (
         f"BCH(n0={params.n0}, k={params.k}, t={params.t}) "
