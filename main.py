@@ -92,7 +92,7 @@ def main():
     parser.add_argument("--n-prompts", type=str, default="1", help="Number of prompts to process, or 'all' for entire dataset (default: 1)")
     parser.add_argument("--verbose", action="store_true", help="Show detailed output and progress information")
     parser.add_argument("--stats", action="store_true", help="Show statistics summary in console (statistics are always saved to file)")
-    parser.add_argument("--force-tokenization", action="store_true", help="Force detokenization and retokenization of text for decoding instead of using token IDs directly")
+    parser.add_argument("--bypass-tokenization", action="store_true", help="Bypass retokenization and use raw token IDs from generation for decoding")
     parser.add_argument("--workers", type=int, default=4, help="Number of worker processes for codebook generation (default: 4)")
     parser.add_argument("--chunk-rows", type=int, default=None, help="Optional override for generation chunk size in rows. If not set, auto policy is used.")
     # If set, run the entire pipeline in the main process (no separate GPU worker / no IPC).
@@ -279,7 +279,7 @@ def main():
         print(f"Warning: Failed to initialize generations.txt: {e}")
     
     # Initialize per-generation outputs DataFrame (only full-length generations will be recorded)
-    generations_columns = ["codeword", "watermark", "decoded_codeword", "retrieved_watermark", "successful_watermark", "distance"]
+    generations_columns = ["codeword", "watermark", "decoded_codeword", "retrieved_watermark", "successful_watermark", "distance", "generated_token_ids", "decoded_token_ids", "generated_text"]
     generations_df = pd.DataFrame(columns=generations_columns)
 
     #----------------------------------------#
@@ -487,10 +487,10 @@ def main():
         full_generation_prompts += 1
         
         # Decode watermark
-        if args.force_tokenization:
-            code_blocks, decoded_tokens_length = decoder.decode(generated_text)
+        if args.bypass_tokenization:
+            code_blocks, decoded_tokens_length, decoded_token_ids = decoder.decode(generated_ids)
         else:
-            code_blocks, decoded_tokens_length = decoder.decode(generated_ids)
+            code_blocks, decoded_tokens_length, decoded_token_ids = decoder.decode(generated_text)
         
         # Single block setup (legacy support for multi-block)
         decoded_codeword = code_blocks[0]
@@ -517,6 +517,9 @@ def main():
                 'codeword': codeword,
                 'watermark_identity': watermark_identity,
                 'decoded_codeword': decoded_codeword,
+                'generated_ids': generated_ids,
+                'decoded_token_ids': decoded_token_ids,
+                'generated_text': generated_text,
             })
         else:
             # Real-time search (default or --dedicated-search-gpu)
@@ -547,6 +550,9 @@ def main():
                 "retrieved_watermark": retrieved_watermark,
                 "successful_watermark": successful_watermark_flag,
                 "distance": search_distance,
+                "generated_token_ids": generated_ids,
+                "decoded_token_ids": decoded_token_ids,
+                "generated_text": generated_text,
             }
 
         processing_progress.update(1)
@@ -632,6 +638,9 @@ def main():
                 "retrieved_watermark": retrieved_watermark,
                 "successful_watermark": successful_watermark_flag,
                 "distance": search_distance,
+                "generated_token_ids": ps['generated_ids'],
+                "decoded_token_ids": ps['decoded_token_ids'],
+                "generated_text": ps['generated_text'],
             }
 
     #----------------------------------------#
