@@ -222,6 +222,54 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         retokenized = self.tokenizer.encode(text, add_special_tokens=False)
         return len(retokenized) == len(generated_ids)
 
+    def _sample_token(
+        self,
+        modified_logits: torch.Tensor,
+        all_ids: List[int],
+        prompt_length: int,
+    ) -> Tuple[Optional[int], int]:
+        """
+        Sample a TI-consistent token from modified logits.
+
+        Returns:
+            (token_id, ti_retries) where token_id is None if EOS was sampled.
+        """
+        excluded_tokens: set = set()
+        max_retries = 50
+        token_id: int = 0
+
+        for _ in range(max_retries):
+            if excluded_tokens:
+                sampling_logits = modified_logits.clone()
+                exc = torch.tensor(list(excluded_tokens), device=sampling_logits.device)
+                sampling_logits[0, 0, exc] = float('-inf')
+            else:
+                sampling_logits = modified_logits
+
+            probs = torch.nn.functional.softmax(sampling_logits, dim=-1)
+
+            if self.temperature == 0 or self.temperature < 1e-6:
+                token_id = int(torch.argmax(probs, dim=-1).item())
+            else:
+                token_id = int(torch.multinomial(probs.squeeze(), 1).item())
+
+            # EOS — don't add to sequence, signal early stop
+            if token_id == self.tokenizer.eos_token_id:
+                return None, len(excluded_tokens)
+
+            all_ids.append(token_id)
+
+            if not self.ti_correction or self._check_token_consistency(all_ids[prompt_length:]):
+                return token_id, len(excluded_tokens)
+
+            # Inconsistent — remove and retry
+            all_ids.pop()
+            excluded_tokens.add(token_id)
+
+        # Max retries exhausted — keep last token
+        all_ids.append(token_id)
+        return token_id, len(excluded_tokens)
+
     def _trim_past_key_values(self, past_key_values, trim_amount: int):
         """
         Trim the K/V cache by removing the oldest entries.
@@ -427,43 +475,12 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
             if self.temperature > 0:
                 modified_logits = modified_logits / self.temperature
 
-            # Sample token with TI correction: retry with excluded tokens until consistent
-            excluded_tokens = set()
-            max_ti_retries = 50
+            # Sample token with TI correction
+            next_token_id, ti_retries = self._sample_token(modified_logits, all_ids, prompt_length)
+            ti_correction_count += ti_retries
 
-            for _ti_retry in range(max_ti_retries):
-                # Apply exclusion mask for TI-inconsistent tokens
-                if excluded_tokens:
-                    sampling_logits = modified_logits.clone()
-                    exc = torch.tensor(list(excluded_tokens), device=sampling_logits.device)
-                    sampling_logits[0, 0, exc] = float('-inf')
-                else:
-                    sampling_logits = modified_logits
-
-                probs = torch.nn.functional.softmax(sampling_logits, dim=-1)
-
-                if self.temperature == 0 or self.temperature < 1e-6:
-                    next_token_id = torch.argmax(probs, dim=-1).item()
-                else:
-                    next_token_id = torch.multinomial(probs.squeeze(), 1).item()
-
-                all_ids.append(next_token_id)
-
-                # EOS bypasses TI correction — pop it (gets stripped by skip_special_tokens) and stop
-                if next_token_id == self.tokenizer.eos_token_id:
-                    all_ids.pop()
-                    break
-
-                if not self.ti_correction or self._check_token_consistency(all_ids[prompt_length:]):
-                    break  # consistent — keep token
-
-                # Inconsistent — pop token, exclude it, resample
-                all_ids.pop()
-                excluded_tokens.add(next_token_id)
-                ti_correction_count += 1
-            else:
-                # Max retries exhausted — keep last token anyway
-                all_ids.append(next_token_id)
+            if next_token_id is None:
+                break  # EOS
 
             tokens_generated += 1
 
@@ -487,10 +504,6 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
             # Update progress bar
             progress_bar.set_description(f"Bit {bit_idx+1}/{self.u}, Green: {green_tokens_selected}, Red: {red_tokens_selected}")
             progress_bar.update(1)
-
-            # Check if we've reached an EOS token
-            if next_token_id == self.tokenizer.eos_token_id:
-                break
 
         progress_bar.close()
 
