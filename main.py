@@ -90,6 +90,7 @@ def main():
     parser.add_argument("--verbose", action="store_true", help="Show detailed output and progress information")
     parser.add_argument("--stats", action="store_true", help="Show statistics summary in console (statistics are always saved to file)")
     parser.add_argument("--bypass-tokenization", action="store_true", help="Bypass retokenization and use raw token IDs from generation for decoding")
+    parser.add_argument("--skip-ti-correction", action="store_true", help="Skip tokenization inconsistency correction (enabled by default)")
     parser.add_argument("--workers", type=int, default=4, help="Number of worker processes for codebook generation (default: 4)")
     parser.add_argument("--chunk-rows", type=int, default=None, help="Optional override for generation chunk size in rows. If not set, auto policy is used.")
     # If set, run the entire pipeline in the main process (no separate GPU worker / no IPC).
@@ -241,6 +242,7 @@ def main():
             "codeword_generation": args.codeword_generation,
             "distance": args.distance,
             "bch_m": args.bch_m,
+            "ti_correction": not args.skip_ti_correction,
         },
         "generation": {
             "temperature": args.temperature,
@@ -284,7 +286,8 @@ def main():
         'context_window': args.context_window,
         'temperature': args.temperature,
         'hash_window': args.hash_window,
-        'verbose': args.verbose and args.synch
+        'verbose': args.verbose and args.synch,
+        'ti_correction': not args.skip_ti_correction
     }
 
     if args.codeword_generation == "rng":
@@ -341,6 +344,7 @@ def main():
     full_generation_prompts         = 0     # Count prompts with full codeword-length generation
     properly_encoded_tokens         = 0     # Across full-length generations only
     total_tokens_generated          = 0     # Across full-length generations only
+    total_ti_corrections            = 0     # TI correction resamples across all generations
     codebook_search_times           = []
     queue_wait_times                = []    # Time spent waiting for GPU queue
 
@@ -479,6 +483,7 @@ def main():
         # Accumulate properly encoded token stats for full-length generations
         properly_encoded_tokens += generation_statistics.get("properly_encoded_tokens", 0)
         total_tokens_generated += generation_statistics.get("total_tokens_generated", 0)
+        total_ti_corrections += generation_statistics.get("ti_correction_count", 0)
         
         # Append to generations.txt for full-length generations
         try:
@@ -677,7 +682,8 @@ def main():
         else:
             pct_proper = 0.0
         f.write(f"Properly encoded tokens: {properly_encoded_tokens} / {total_tokens_generated} ({pct_proper:.2f}%)\n")
-        
+        f.write(f"TI corrections: {total_ti_corrections}\n")
+
         f.write("\n")
         
         # Write distance statistics
