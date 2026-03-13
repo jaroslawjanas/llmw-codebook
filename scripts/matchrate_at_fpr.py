@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-TPR @ Target FPR Analysis
+Match Rate @ Target FPR Analysis
 
 - Generates negative-set distances from random bit sequences against a codebook to compute FPR.
 - Loads positive-set results from output/ (each run directory), aggregates per canonical model.
@@ -8,10 +8,10 @@ TPR @ Target FPR Analysis
 - Prints a summary table and generates a per-model histogram plot.
 
 Usage examples:
-  python scripts/tpr_at_fpr.py --n 20 --u 128 --z 10000 --distance hamming --verbose
-  python scripts/tpr_at_fpr.py --n 20 --u 128 --z 50000 --distance hamming --fpr-target 0.01
-  python scripts/tpr_at_fpr.py --n 20 --u 128 --z 10000 --distance hamming --include-models Llama-3.2-3B
-  python scripts/tpr_at_fpr.py --n 16 --u 128 --z 10000 --distance levenshtein --codebook-generation bch --bch-m 8
+  python scripts/matchrate_at_fpr.py --n 20 --u 128 --z 10000 --distance hamming --verbose
+  python scripts/matchrate_at_fpr.py --n 20 --u 128 --z 50000 --distance hamming --fpr-target 0.01
+  python scripts/matchrate_at_fpr.py --n 20 --u 128 --z 10000 --distance hamming --include-models Llama-3.2-3B
+  python scripts/matchrate_at_fpr.py --n 16 --u 128 --z 10000 --distance levenshtein --codebook-generation bch --bch-m 8
 """
 
 from __future__ import annotations
@@ -276,9 +276,9 @@ def compute_model_stats(
     model_to_df: dict[str, pd.DataFrame],
     threshold: int,
 ) -> list[dict]:
-    """Compute per-model stats, sorted by TPR descending.
+    """Compute per-model stats, sorted by model name.
 
-    Returns list of dicts with keys: model, total, true_positive, match_rate, tpr.
+    Returns list of dicts with keys: model, total, true_positive, match_rate, match_rate_at_fpr.
     """
     rows = []
     for model, df in model_to_df.items():
@@ -287,13 +287,13 @@ def compute_model_stats(
         match_rate = true_positive / total if total > 0 else 0.0
         successful = df[df["successful_watermark"] == True]
         detected = int((successful["distance"] <= threshold).sum())
-        tpr = detected / total if total > 0 else 0.0
+        match_rate_at_fpr = detected / total if total > 0 else 0.0
         rows.append({
             "model": model,
             "total": total,
             "true_positive": true_positive,
             "match_rate": match_rate,
-            "tpr": tpr,
+            "match_rate_at_fpr": match_rate_at_fpr,
         })
 
     # Sort by model name
@@ -315,11 +315,11 @@ def write_results_txt(
 ) -> None:
     """Write a formatted results.txt file."""
     fpr_pct = actual_fpr * 100
-    tpr_header = f"TPR @ FPR={fpr_pct:.2f}%"
+    match_rate_at_fpr_header = f"Match Rate @ FPR={fpr_pct:.2f}%"
 
     lines = []
     lines.append("=" * 60)
-    lines.append(f"TPR @ FPR = {args.fpr_target*100:.2f}% Analysis")
+    lines.append(f"Match Rate @ FPR = {args.fpr_target*100:.2f}% Analysis")
     lines.append("=" * 60)
     lines.append("")
     lines.append("Parameters:")
@@ -341,7 +341,7 @@ def write_results_txt(
         lines.append(f"  Total samples: {row['total']}")
         lines.append(f"  True Positives (TP): {row['true_positive']}")
         lines.append(f"  Match rate: {row['match_rate']*100:.2f}%")
-        lines.append(f"  TPR: {row['tpr']*100:.2f}%")
+        lines.append(f"  Match Rate @ FPR: {row['match_rate_at_fpr']*100:.2f}%")
 
     lines.append("-" * 60)
     lines.append("")
@@ -350,11 +350,11 @@ def write_results_txt(
     # Find longest model name for alignment
     max_name = max(len(r["model"]) for r in stats)
     col_w = max(max_name, 5) + 2
-    lines.append(f"  {'Model':<{col_w}} {'Match':<10} {tpr_header}")
+    lines.append(f"  {'Model':<{col_w}} {'Match':<10} {match_rate_at_fpr_header}")
     for row in stats:
         lines.append(
             f"  {row['model']:<{col_w}} {row['match_rate']*100:.2f}%"
-            f"    {row['tpr']*100:.2f}%"
+            f"    {row['match_rate_at_fpr']*100:.2f}%"
         )
     lines.append("")
 
@@ -385,7 +385,7 @@ def create_table_image(
     n_data_rows = len(stats)
 
     # Build cell data
-    col_labels = ["Model", "Total", "True Positives", "Match Rate", f"TPR@{fpr_pct:.2f}%"]
+    col_labels = ["Model", "Total", "True Positives", "Match Rate", f"Match Rate@FPR={fpr_pct:.2f}%"]
     cell_text = []
     for row in stats:
         cell_text.append([
@@ -393,7 +393,7 @@ def create_table_image(
             str(row["total"]),
             str(row["true_positive"]),
             f"{row['match_rate']*100:.1f}%",
-            f"{row['tpr']*100:.1f}%",
+            f"{row['match_rate_at_fpr']*100:.1f}%",
         ])
 
     fig, ax = plt.subplots(figsize=(9, max(2, n_data_rows * 0.5 + 1)))
@@ -427,7 +427,7 @@ def create_table_image(
             table[(i, j)].set_facecolor(bg)
 
     plt.title(
-        f"TPR @ FPR={fpr_pct:.2f}% (n={args.n}, u={args.u}, z={args.z})",
+        f"Match Rate @ FPR={fpr_pct:.2f}% (n={args.n}, u={args.u}, z={args.z})",
         fontsize=11, fontweight="bold", pad=20,
     )
     plt.tight_layout()
@@ -536,7 +536,7 @@ def create_histogram(
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="TPR @ Target FPR Analysis")
+    parser = argparse.ArgumentParser(description="Match Rate @ Target FPR Analysis")
 
     # Required
     parser.add_argument("--n", type=int, required=True, help="Codebook size parameter (2^n entries)")
@@ -614,7 +614,7 @@ def main():
     # Step 4: Create output directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir_name = (
-        f"tpr_at_fpr_n{args.n}_u{args.u}_z{args.z}"
+        f"matchrate_at_fpr_n{args.n}_u{args.u}_z{args.z}"
         f"_dist-{args.distance}_c-{args.codebook_generation}"
         f"_fpr{args.fpr_target}_{timestamp}"
     )

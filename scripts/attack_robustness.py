@@ -3,7 +3,7 @@
 Attack Robustness Analysis Script.
 
 Tests how watermark detection degrades under substitution, insertion, and
-deletion attacks applied to decoded codewords, reporting TPR at a fixed
+deletion attacks applied to decoded codewords, reporting match rate at a fixed
 FPR threshold.
 
 Supports both Hamming and Levenshtein distance metrics.
@@ -37,7 +37,7 @@ import pandas as pd
 from tqdm import tqdm
 
 import src.paths as paths
-from scripts.tpr_at_fpr import (
+from scripts.matchrate_at_fpr import (
     find_threshold,
     load_or_generate_negatives,
     load_positive_data,
@@ -206,13 +206,13 @@ def evaluate_attack_robustness(
     codebooks: list | None = None,
 ) -> tuple[dict[int, float], list[dict]]:
     """
-    Evaluate TPR at each specified budget level.
+    Evaluate match rate at each specified budget level.
 
     Args:
         decoded_codewords: Decoded codewords from successful watermark samples only.
         original_watermarks: Original watermark identities for each decoded codeword.
         original_codewords: Bitstrings of the original codebook codewords (pre-computed).
-        total_samples: Total number of samples (all rows) for TPR denominator.
+        total_samples: Total number of samples (all rows) for match rate denominator.
         codebook: CodebookHamming or CodebookLevenshtein instance.
         attack_fn: Attack function to apply.
         budgets: List of budget values to evaluate (must include 0 for baseline).
@@ -294,8 +294,8 @@ def evaluate_attack_robustness(
             else:
                 tp = 0
 
-        tpr = tp / total_samples if total_samples > 0 else 0.0
-        results[budget] = tpr
+        match_rate_at_fpr = tp / total_samples if total_samples > 0 else 0.0
+        results[budget] = match_rate_at_fpr
 
     return results, detail_rows
 
@@ -338,7 +338,7 @@ def create_model_plot(
             )
 
         ax.set_xlabel("Number of adversarial interventions")
-        ax.set_ylabel(f"TPR @ FPR={actual_fpr * 100:.2f}%")
+        ax.set_ylabel(f"Match Rate @ FPR={actual_fpr * 100:.2f}%")
         ax.set_title(attack_name)
         ax.set_ylim(0, 105)
         ax.set_xlim(budgets[0], budgets[-1])
@@ -399,7 +399,7 @@ def write_results_txt(
     budgets = args.budgets
 
     for attack_name in attack_names:
-        lines.append(f"TPR (%) @ FPR={actual_fpr * 100:.2f}% — {attack_name}")
+        lines.append(f"Match Rate (%) @ FPR={actual_fpr * 100:.2f}% — {attack_name}")
         # Header row: model column + budget columns
         header = " " * model_col_width
         header += "".join(f"{b:>{budget_col_width}}" for b in budgets)
@@ -444,7 +444,7 @@ def main() -> None:
     args = parse_args()
     paths.ensure_directories()
 
-    # Build codebook (same pattern as tpr_at_fpr.py)
+    # Build codebook (same pattern as matchrate_at_fpr.py)
     if args.codebook_generation == "rng":
         generator_cls = RNGCodewordGenerator
         generator_kwargs: dict = {}
