@@ -497,6 +497,9 @@ def main():
             print(f"Warning: Failed to write generations.txt: {e}")
         
         if args.delayed_search:
+            if args.verbose:
+                print(f"\tQueue wait: {wait_time * 1000:.2f} ms\n")
+
             # Collect data for batch search after generation completes
             pending_searches.append({
                 'prompt_idx': prompt_idx,
