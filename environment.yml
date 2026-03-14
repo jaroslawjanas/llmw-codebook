@@ -9,7 +9,7 @@ channels:
 dependencies:
   - python=3.10
 # -- Pytorch --
-  - pytorch::pytorch=2.5.1
+  - pytorch::pytorch=2.5.1 #2.4.1 might be needed for some older GPUs
   - pytorch::pytorch-cuda=11.8 # 12.4
 # -------------
   - transformers=4.51.3
