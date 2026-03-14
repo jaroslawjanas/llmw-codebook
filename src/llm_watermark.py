@@ -570,18 +570,18 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         super().__init__(model_name, secret_key, n, u, green_list_fraction, seed, cache_dir, device, verbose)
 
         
-    def decode(self, generated: Union[str, List[int]]) -> Tuple[List[List[int]], int]:
+    def decode(self, generated: Union[str, List[int]]) -> Tuple[List[List[int]], int, List[int]]:
         """
         Decode watermark information from generated text or pre-tokenized IDs.
-        
+
         Args:
             generated: Union[str, List[int]] - Either the generated text (prompt removed) or a list of token IDs
-            
+
         Returns:
-            List of blocks, each containing:
-            - 'x': x-coordinate (GF element as integer)
-            - 'y_bits': Binary sequence representing y-value [0,1,0,1,...]
-            - 'y': y-value as GF element converted to integer
+            Tuple of (blocks, decoded_tokens_length, token_ids):
+            - blocks: List of bit-code lists extracted from each complete block
+            - decoded_tokens_length: Number of tokens used for decoding
+            - token_ids: The token IDs used for decoding
         """
         # Determine input type: list of ids or string text
         if isinstance(generated, list):
@@ -598,7 +598,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         num_complete_blocks = len(token_ids) // self.u
         
         if num_complete_blocks < 1:
-            return [], 0  # No complete blocks to decode
+            return [], 0, token_ids  # No complete blocks to decode
         
         blocks = []
         
@@ -635,4 +635,4 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         
         progress_bar.close()
         
-        return blocks, decoded_tokens_length
+        return blocks, decoded_tokens_length, token_ids
