@@ -439,11 +439,7 @@ def main():
         if args.verbose:
             print(f"\tGeneration time: {gen_time * 1000:.2f} ms")
             print(f"\tQueue wait: {wait_time * 1000:.2f} ms")
-            print(f"\tBCH decode time: {decode_time * 1000:.2f} ms")
-            print(f"\tOriginal watermark: {watermark_int}")
-            print(f"\tRecovered watermark: {recovered_watermark}")
-            print(f"\tBit errors: {bit_errors}")
-            print(f"\tDecode success: {successful_watermark}\n")
+            print(f"\tBCH decode time: {decode_time * 1000:.2f} ms\n")
 
         # Convert to string for easier output
         codeword_str = ''.join(map(str, codeword))
