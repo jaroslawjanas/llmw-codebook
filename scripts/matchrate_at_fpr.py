@@ -1,14 +1,14 @@
 """
-TPR @ FPR Analysis Script.
+Match Rate @ FPR Analysis Script.
 
-Calculates True Positive Rate at a fixed False Positive Rate (default 1%)
+Calculates match rate at a fixed False Positive Rate (default 1%)
 for all models with matching (n, u) parameters.
 
 Algorithm:
 1. Generate z random binary sequences of length u
 2. BCH decode each to get bit_errors (distance to nearest valid codeword)
 3. Find threshold where approximately fpr_target% of random sequences are "false positives"
-4. For each model, calculate TPR = (samples with bit_errors <= threshold) / total
+4. For each model, calculate match_rate = (samples with bit_errors <= threshold) / total
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ from src.bch_codec import BCHCodec
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Calculate TPR at a fixed FPR threshold"
+        description="Calculate match rate at a fixed FPR threshold"
     )
     parser.add_argument(
         "--n", type=int, required=True,
@@ -144,13 +144,13 @@ def find_fpr_threshold(
     return threshold, actual_fpr
 
 
-def calculate_tpr_for_model(
+def calculate_match_rate_for_model(
     model: str,
     model_paths: list,
     threshold: int,
 ) -> tuple[dict, np.ndarray]:
     """
-    Calculate TPR for a specific model at the given threshold.
+    Calculate match rate for a specific model at the given threshold.
 
     Args:
         model: Model name
@@ -159,7 +159,7 @@ def calculate_tpr_for_model(
 
     Returns:
         Tuple of (stats_dict, bit_errors_array):
-        - stats_dict: model, total, tp, tpr, match_rate
+        - stats_dict: model, total, tp, match_rate_at_fpr, match_rate
         - bit_errors_array: bit_errors for successful watermarks (for histogram)
     """
     df = load_and_merge(model_paths)
@@ -169,7 +169,7 @@ def calculate_tpr_for_model(
     # Apply threshold only to successfully decoded watermark rows
     successful = df[df["successful_watermark"]]
     tp = int((successful["bit_errors"] <= threshold).sum())
-    tpr = tp / total_samples if total_samples > 0 else 0.0
+    match_rate_at_fpr = tp / total_samples if total_samples > 0 else 0.0
 
     # Match rate: successful decodes / total samples
     n_successful = int(df["successful_watermark"].sum())
@@ -179,7 +179,7 @@ def calculate_tpr_for_model(
         "model": model,
         "total": total_samples,
         "tp": tp,
-        "tpr": tpr,
+        "match_rate_at_fpr": match_rate_at_fpr,
         "match_rate": match_rate,
     }
 
@@ -199,7 +199,7 @@ def create_results_txt(
     """Write detailed results to text file."""
     with open(output_path, "w") as f:
         f.write("=" * 60 + "\n")
-        f.write(f"TPR @ FPR = {args.fpr_target * 100:.2f}% Analysis\n")
+        f.write(f"Match Rate @ FPR = {args.fpr_target * 100:.2f}% Analysis\n")
         f.write("=" * 60 + "\n\n")
 
         f.write("Parameters:\n")
@@ -223,15 +223,15 @@ def create_results_txt(
             f.write(f"  Total samples: {r['total']}\n")
             f.write(f"  True Positives (TP): {r['tp']}\n")
             f.write(f"  Match rate: {r['match_rate'] * 100:.2f}%\n")
-            f.write(f"  TPR: {r['tpr'] * 100:.2f}%\n")
+            f.write(f"  Match Rate @ FPR: {r['match_rate_at_fpr'] * 100:.2f}%\n")
             f.write("-" * 60 + "\n")
 
         f.write("\nSummary Table:\n")
         max_model_len = max(len(r["model"]) for r in results)
-        header = f"  {'Model':<{max_model_len}}  Match     TPR @ FPR={actual_fpr * 100:.2f}%"
+        header = f"  {'Model':<{max_model_len}}  Match     Match Rate @ FPR={actual_fpr * 100:.2f}%"
         f.write(header + "\n")
         for r in results:
-            f.write(f"  {r['model']:<{max_model_len}}  {r['match_rate'] * 100:5.2f}%    {r['tpr'] * 100:.2f}%\n")
+            f.write(f"  {r['model']:<{max_model_len}}  {r['match_rate'] * 100:5.2f}%    {r['match_rate_at_fpr'] * 100:.2f}%\n")
 
 
 def create_table_png(
@@ -254,7 +254,7 @@ def create_table_png(
             f"{r['total']}",
             f"{r['tp']}",
             f"{r['match_rate'] * 100:.1f}%",
-            f"{r['tpr'] * 100:.1f}%"
+            f"{r['match_rate_at_fpr'] * 100:.1f}%"
         ])
 
     col_labels = [
@@ -262,7 +262,7 @@ def create_table_png(
         "Total",
         "True Positives",
         "Match Rate",
-        f"TPR@{actual_fpr * 100:.2f}%",
+        f"Match Rate@FPR={actual_fpr * 100:.2f}%",
     ]
 
     fig, ax = plt.subplots(figsize=(9, max(2, len(results) * 0.5 + 1)))
@@ -296,7 +296,7 @@ def create_table_png(
             table[(i, j)].set_facecolor(color)
 
     plt.title(
-        f"TPR @ FPR={actual_fpr * 100:.2f}% (n={args.n}, u={args.u}, z={args.z})",
+        f"Match Rate @ FPR={actual_fpr * 100:.2f}% (n={args.n}, u={args.u}, z={args.z})",
         fontsize=11,
         fontweight="bold",
         pad=20
@@ -444,23 +444,23 @@ def main() -> None:
     print(f"\nFPR threshold: bit_errors <= {threshold}")
     print(f"Actual FPR: {actual_fpr * 100:.2f}%\n")
 
-    # Phase 3: Calculate TPR per model
+    # Phase 3: Calculate match rate per model
     results = []
     model_bit_errors = {}  # Per-model bit errors for histogram
 
-    for model in tqdm(models, desc="Calculating TPR"):
+    for model in tqdm(models, desc="Calculating match rate"):
         model_paths = matching[matching["model"] == model]["path"].tolist()
-        stats, bit_errors = calculate_tpr_for_model(model, model_paths=model_paths, threshold=threshold)
+        stats, bit_errors = calculate_match_rate_for_model(model, model_paths=model_paths, threshold=threshold)
         results.append(stats)
         model_bit_errors[model] = bit_errors
 
-    # Sort results by TPR descending
-    results.sort(key=lambda x: x["tpr"], reverse=True)
+    # Sort results by match rate descending
+    results.sort(key=lambda x: x["match_rate_at_fpr"], reverse=True)
 
     # Create output directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = Path(__file__).parent.parent / "output" / (
-        f"tpr_at_fpr_n{args.n}_u{args.u}_z{args.z}_fpr{args.fpr_target}_{timestamp}"
+        f"matchrate_at_fpr_n{args.n}_u{args.u}_z{args.z}_fpr{args.fpr_target}_{timestamp}"
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -496,7 +496,7 @@ def main() -> None:
     print("\nSummary:")
     print("-" * 50)
     for r in results:
-        print(f"  {shorten_model_name(r['model']):<35} TPR = {r['tpr'] * 100:.2f}%")
+        print(f"  {shorten_model_name(r['model']):<35} Match Rate = {r['match_rate_at_fpr'] * 100:.2f}%")
 
 
 if __name__ == "__main__":

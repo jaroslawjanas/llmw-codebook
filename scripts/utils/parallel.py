@@ -193,7 +193,7 @@ def evaluate_attack_robustness_parallel(
         seed: Random seed
 
     Returns:
-        Dict mapping attack_name -> dict[budget -> tpr]
+        Dict mapping attack_name -> dict[budget -> match_rate_at_fpr]
     """
     total = len(df)
     successful = df[df["successful_watermark"]]

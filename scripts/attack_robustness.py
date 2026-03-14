@@ -5,7 +5,7 @@ Tests how watermark detection degrades under substitution, insertion, and
 deletion attacks applied to decoded codewords.
 
 For each attack type, iterates from budget=0 to max_budget and measures
-TPR at a fixed FPR threshold (default 1%).
+match rate at a fixed FPR threshold (default 1%).
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from tqdm import tqdm
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from scripts.tpr_at_fpr import find_fpr_threshold
+from scripts.matchrate_at_fpr import find_fpr_threshold
 from scripts.utils import discover_experiments, load_and_merge
 from scripts.utils.parallel import (
     create_bch_pool,
@@ -202,13 +202,13 @@ def evaluate_attack_robustness(
     attack_name: str,
 ) -> dict[int, float]:
     """
-    Evaluate TPR at each attack budget level.
+    Evaluate match rate at each attack budget level.
 
     For each budget from 0 to max_budget:
     1. Apply attack to each row's decoded_codeword
     2. BCH decode the attacked codeword
     3. Check if bit_errors <= threshold (true positive)
-    4. Calculate TPR = true_positives / total_samples
+    4. Calculate match_rate = true_positives / total_samples
 
     Args:
         df: DataFrame with 'decoded_codeword' column
@@ -220,7 +220,7 @@ def evaluate_attack_robustness(
         attack_name: Name of attack for progress bar
 
     Returns:
-        Dict mapping budget -> tpr
+        Dict mapping budget -> match_rate_at_fpr
     """
     results = {}
 
@@ -250,8 +250,8 @@ def evaluate_attack_robustness(
             if recovered_watermark == original_watermarks[i] and bit_errors <= threshold:
                 tp += 1
 
-        tpr = tp / total if total > 0 else 0.0
-        results[budget] = tpr
+        match_rate_at_fpr = tp / total if total > 0 else 0.0
+        results[budget] = match_rate_at_fpr
 
     return results
 
@@ -269,8 +269,8 @@ def create_model_plot(
     Create a PNG with 3 subplots (substitution, insertion, deletion).
 
     X-axis: Number of adversarial interventions
-    Y-axis: TPR at target FPR (%)
-    Green dashed baseline showing budget=0 TPR.
+    Y-axis: Match rate at target FPR (%)
+    Green dashed baseline showing budget=0 match rate.
     """
     try:
         import matplotlib.pyplot as plt
@@ -307,7 +307,7 @@ def create_model_plot(
                         xytext=(0, y_offset), ha='center', fontsize=7, color='#333333')
 
         ax.set_xlabel('Number of adversarial interventions')
-        ax.set_ylabel(f'TPR @ FPR={actual_fpr * 100:.2f}%')
+        ax.set_ylabel(f'Match Rate @ FPR={actual_fpr * 100:.2f}%')
         ax.set_title(attack_name)
         ax.set_ylim(0, 100)
         ax.set_xlim(budgets[0], budgets[-1])
@@ -365,7 +365,7 @@ def create_results_txt(
     budgets = sorted(next(iter(next(iter(all_results.values())).values())).keys())
 
     for attack_name in attack_names:
-        lines.append(f"TPR (%) @ FPR={actual_fpr * 100:.2f}% — {attack_name}")
+        lines.append(f"Match Rate (%) @ FPR={actual_fpr * 100:.2f}% — {attack_name}")
         header = " " * model_col_width
         header += "".join(f"{b:>{budget_col_width}}" for b in budgets)
         lines.append(header)
