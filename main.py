@@ -94,6 +94,7 @@ def main():
     parser.add_argument("--verbose", action="store_true", help="Show detailed output and progress information")
     parser.add_argument("--stats", action="store_true", help="Show statistics summary in console (statistics are always saved to file)")
     parser.add_argument("--bypass-tokenization", action="store_true", help="Bypass retokenization and use raw token IDs from generation for decoding")
+    parser.add_argument("--skip-ti-correction", action="store_true", help="Skip tokenization inconsistency correction (enabled by default)")
     # If set, run the entire pipeline in the main process (no separate GPU worker / no IPC).
     # Useful for debugging and environments where multiprocessing is problematic or when you want deterministic,
     # step-by-step execution without producer/consumer overlap.
@@ -235,7 +236,8 @@ def main():
         'context_window': args.context_window,
         'temperature': args.temperature,
         'hash_window': args.hash_window,
-        'verbose': args.verbose and args.synch
+        'verbose': args.verbose and args.synch,
+        'ti_correction': not args.skip_ti_correction
     }
 
     # Create decoder once (shared across all prompts)
@@ -257,6 +259,7 @@ def main():
     full_generation_prompts = 0         # Count prompts with full codeword-length generation
     properly_encoded_tokens = 0         # Across full-length generations only
     total_tokens_generated = 0          # Across full-length generations only
+    total_ti_corrections = 0            # TI correction resamples across all generations
     bch_decode_times = []
     queue_wait_times = []               # Time spent waiting for GPU queue
 
@@ -397,6 +400,7 @@ def main():
         # Accumulate properly encoded token stats for full-length generations
         properly_encoded_tokens += generation_statistics.get("properly_encoded_tokens", 0)
         total_tokens_generated += generation_statistics.get("total_tokens_generated", 0)
+        total_ti_corrections += generation_statistics.get("ti_correction_count", 0)
 
         # Append to generations.txt for full-length generations
         try:
@@ -510,6 +514,7 @@ def main():
         else:
             pct_proper = 0.0
         f.write(f"Properly encoded tokens: {properly_encoded_tokens} / {total_tokens_generated} ({pct_proper:.2f}%)\n")
+        f.write(f"TI corrections: {total_ti_corrections}\n")
 
         f.write("\n")
 
@@ -576,6 +581,7 @@ def main():
             "secret_key": args.secret_key,
             "green_fraction": args.green_fraction,
             "bias": args.bias,
+            "ti_correction": not args.skip_ti_correction,
         },
         "bch": {
             "m": bch_codec.params.m,

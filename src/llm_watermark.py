@@ -151,6 +151,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         context_window: int = 1500,
         temperature: float = 0.0,
         hash_window: int = 1,
+        ti_correction: bool = True,
         verbose: bool = False
     ):
         """
@@ -169,6 +170,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
             context_window: Maximum number of tokens to use as context for generation (default: 1024)
             temperature: Sampling temperature (default: 0.0 = greedy sampling, higher = more random)
             hash_window: Number of previous tokens to hash together (default: 1)
+            ti_correction: Enable tokenization inconsistency correction (default: True)
         """
         # Initialize base class
         super().__init__(model_name, secret_key, n, u, green_list_fraction, seed, cache_dir, device, verbose)
@@ -178,7 +180,8 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         self.context_window = context_window
         self.temperature = temperature
         self.hash_window = hash_window
-        
+        self.ti_correction = ti_correction
+
         # Load model (tokenizer already loaded by base class)
         self._load_model()
         
@@ -212,7 +215,13 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
                 **model_kwargs
             )
             self.model.to(self.device)
-            
+
+    def _check_token_consistency(self, generated_ids: List[int]) -> bool:
+        """Check if token list survives a decode→encode round-trip with same length."""
+        text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+        retokenized = self.tokenizer.encode(text, add_special_tokens=False)
+        return len(retokenized) == len(generated_ids)
+
     def _trim_past_key_values(self, past_key_values, trim_amount: int):
         """
         Trim the K/V cache by removing the oldest entries.
@@ -360,6 +369,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         cache_position = 0
 
         assert len(bit_code) == self.u
+        prompt_length = len(input_ids[0])
 
         # Setup progress tracking
         progress_bar = tqdm(range(self.u), disable=not self.verbose)
@@ -367,6 +377,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         green_tokens_selected = 0
         red_tokens_selected = 0
         properly_encoded_tokens = 0
+        ti_correction_count = 0
 
         # Generate u tokens, one per bit in the codeword
         for bit_idx in range(self.u):
@@ -416,14 +427,45 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
             if self.temperature > 0:
                 modified_logits = modified_logits / self.temperature
 
-            # Get probabilities through softmax
-            probs = torch.nn.functional.softmax(modified_logits, dim=-1)
+            # Sample token with TI correction: retry with excluded tokens until consistent
+            excluded_tokens = set()
+            max_ti_retries = 50
 
-            # Token sampling based on temperature
-            if self.temperature == 0 or self.temperature < 1e-6:
-                next_token_id = torch.argmax(probs, dim=-1).item()
+            for _ti_retry in range(max_ti_retries):
+                # Apply exclusion mask for TI-inconsistent tokens
+                if excluded_tokens:
+                    sampling_logits = modified_logits.clone()
+                    exc = torch.tensor(list(excluded_tokens), device=sampling_logits.device)
+                    sampling_logits[0, 0, exc] = float('-inf')
+                else:
+                    sampling_logits = modified_logits
+
+                probs = torch.nn.functional.softmax(sampling_logits, dim=-1)
+
+                if self.temperature == 0 or self.temperature < 1e-6:
+                    next_token_id = torch.argmax(probs, dim=-1).item()
+                else:
+                    next_token_id = torch.multinomial(probs.squeeze(), 1).item()
+
+                all_ids.append(next_token_id)
+
+                # EOS bypasses TI correction — pop it (gets stripped by skip_special_tokens) and stop
+                if next_token_id == self.tokenizer.eos_token_id:
+                    all_ids.pop()
+                    break
+
+                if not self.ti_correction or self._check_token_consistency(all_ids[prompt_length:]):
+                    break  # consistent — keep token
+
+                # Inconsistent — pop token, exclude it, resample
+                all_ids.pop()
+                excluded_tokens.add(next_token_id)
+                ti_correction_count += 1
             else:
-                next_token_id = torch.multinomial(probs.squeeze(), 1).item()
+                # Max retries exhausted — keep last token anyway
+                all_ids.append(next_token_id)
+
+            tokens_generated += 1
 
             # Track whether the selected token was from the green or red list
             green_tokens, red_tokens = self._get_red_green_tokens(current_previous_token)
@@ -442,10 +484,6 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
                 if current_bit == encoded_bit:
                     properly_encoded_tokens += 1
 
-            # Add the new token to generated ids
-            all_ids.append(next_token_id)
-            tokens_generated += 1
-
             # Update progress bar
             progress_bar.set_description(f"Bit {bit_idx+1}/{self.u}, Green: {green_tokens_selected}, Red: {red_tokens_selected}")
             progress_bar.update(1)
@@ -457,8 +495,6 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         progress_bar.close()
 
         # Separate prompt from generated content
-        prompt_length = len(input_ids[0])
-
         if len(all_ids) > prompt_length:
             generated_ids = all_ids[prompt_length:]
             assert len(generated_ids) == tokens_generated
@@ -473,7 +509,8 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
             "red_tokens": red_tokens_selected,
             "total_tokens_generated": tokens_generated,
             "green_ratio": green_tokens_selected / (green_tokens_selected + red_tokens_selected + 1e-10),
-            "properly_encoded_tokens": properly_encoded_tokens
+            "properly_encoded_tokens": properly_encoded_tokens,
+            "ti_correction_count": ti_correction_count
         }
 
         return full_text, generated_text, generated_ids, formatted_prompt, statistics
