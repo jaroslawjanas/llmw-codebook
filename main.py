@@ -38,10 +38,12 @@ def gpu_generation_worker(watermarker_config, batch_items, results_queue):
 
     for prompt_idx, prompt, codeword, watermark_int in batch_items:
         try:
+            gen_start = time.time()
             result = watermarker.generate_text(
                 prompt=prompt,
                 bit_code=codeword,
             )
+            gen_time = time.time() - gen_start
             full_text, generated_text, generated_ids, formatted_prompt, generation_statistics = result
 
             # Convert tensor to list for pickling across processes
@@ -56,6 +58,7 @@ def gpu_generation_worker(watermarker_config, batch_items, results_queue):
                 'generated_text': generated_text,
                 'generated_ids': generated_ids_list,
                 'generation_statistics': generation_statistics,
+                'generation_time': gen_time,
                 'success': True,
             })
         except Exception as e:
@@ -262,6 +265,7 @@ def main():
     total_ti_corrections = 0            # TI correction resamples across all generations
     bch_decode_times = []
     queue_wait_times = []               # Time spent waiting for GPU queue
+    generation_times = []               # Per-prompt generation time (from GPU worker)
 
     #----------------------------------------#
     #     Prepare Batch Items (Producer)     #
@@ -369,6 +373,8 @@ def main():
         generated_ids = item['generated_ids']
         generated_text = item['generated_text']
         generation_statistics = item['generation_statistics']
+        gen_time = item.get('generation_time', 0.0)
+        generation_times.append(gen_time)
 
         # Verbose output for this prompt
         if args.verbose:
@@ -431,6 +437,7 @@ def main():
             bit_errors_list.append(bit_errors)
 
         if args.verbose:
+            print(f"\tGeneration time: {gen_time * 1000:.2f} ms")
             print(f"\tQueue wait: {wait_time * 1000:.2f} ms")
             print(f"\tBCH decode time: {decode_time * 1000:.2f} ms")
             print(f"\tOriginal watermark: {watermark_int}")
@@ -468,6 +475,7 @@ def main():
     #----------------------------------------#
 
     # Calculate timing averages once
+    avg_generation_time = 1000 * float(np.mean(generation_times)) if generation_times else 0.0
     avg_bch_decode_time = 1000 * float(np.mean(bch_decode_times)) if bch_decode_times else 0.0
     avg_queue_wait_time = 1000 * float(np.mean(queue_wait_times)) if queue_wait_times else 0.0
     total_queue_wait_time_seconds = float(np.sum(queue_wait_times)) if queue_wait_times else 0.0
@@ -530,6 +538,7 @@ def main():
             f.write(f"No successful recoveries to calculate bit error statistics\n")
 
         # Timing statistics
+        f.write(f"Average generation time: {avg_generation_time:.2f} ms\n")
         f.write(f"Average BCH decode time: {avg_bch_decode_time:.2f} ms\n")
         f.write(f"Average queue wait time: {avg_queue_wait_time:.2f} ms\n")
         f.write(f"Total queue wait time: {total_queue_wait_time_seconds:.2f} s\n")
@@ -546,7 +555,8 @@ def main():
     else:
         print(f"No successful recoveries to calculate average bit errors")
 
-    # Display average decode time and queue wait time
+    # Display average timings
+    print(f"Average generation time: {avg_generation_time:.2f} ms")
     print(f"Average BCH decode time: {avg_bch_decode_time:.2f} ms")
     print(f"Average queue wait time: {avg_queue_wait_time:.2f} ms")
 
