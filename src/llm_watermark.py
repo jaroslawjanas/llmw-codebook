@@ -235,7 +235,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
             (token_id, ti_retries) where token_id is None if EOS was sampled.
         """
         excluded_tokens: set = set()
-        max_retries = 50
+        max_retries = 100
         token_id: int = 0
 
         for _ in range(max_retries):
