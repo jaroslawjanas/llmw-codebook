@@ -23,7 +23,7 @@ from src.bch_params import format_bch_summary
 from tqdm import tqdm
 
 
-def gpu_generation_worker(watermarker_config, batch_items, results_queue, effective_max_tokens):
+def gpu_generation_worker(watermarker_config, batch_items, results_queue):
     """
     Producer: generates text for each prompt and puts results in queue.
     Runs in a separate process to allow GPU work to overlap with CPU decode.
@@ -32,7 +32,6 @@ def gpu_generation_worker(watermarker_config, batch_items, results_queue, effect
         watermarker_config: Dict with LLMWatermarkEncoder configuration
         batch_items: List of (prompt_idx, prompt, codeword, watermark_int) tuples
         results_queue: multiprocessing.Queue to put results into
-        effective_max_tokens: Max tokens to generate per prompt
     """
     # Create watermarker in this process (models can't be pickled across processes)
     watermarker = LLMWatermarkEncoder(**watermarker_config)
@@ -42,9 +41,8 @@ def gpu_generation_worker(watermarker_config, batch_items, results_queue, effect
             result = watermarker.generate_text(
                 prompt=prompt,
                 bit_code=codeword,
-                max_new_tokens=effective_max_tokens
             )
-            full_text, generated_text, generated_ids, formatted_prompt, generation_statistics, watermark_blocks_info = result
+            full_text, generated_text, generated_ids, formatted_prompt, generation_statistics = result
 
             # Convert tensor to list for pickling across processes
             generated_ids_list = list(generated_ids) if isinstance(generated_ids, list) else generated_ids.tolist()
@@ -77,7 +75,6 @@ def gpu_generation_worker(watermarker_config, batch_items, results_queue, effect
 def main():
     parser = argparse.ArgumentParser(description="BCH-based LLM Text Watermarking")
     parser.add_argument("--model", type=str, default="facebook/opt-125m", help="Model to use")
-    parser.add_argument("--max-tokens", type=int, default=None, help="Maximum tokens to generate (default: match --u)")
     parser.add_argument("--green-fraction", type=float, default=0.5, help="Fraction of tokens in green list")
     parser.add_argument("--bias", type=float, default=6.0, help="Bias to add to green/red tokens")
     parser.add_argument("--n", type=int, default=16, help="Watermark message length in bits (supports 2^n unique watermarks)")
@@ -139,16 +136,6 @@ def main():
 
     print(f"Using secret key: {args.secret_key}\n")
 
-    # Determine effective max tokens: default to u when not provided, and ensure multiple of u
-    if args.max_tokens is None:
-        effective_max_tokens = args.u
-    else:
-        effective_max_tokens = args.max_tokens
-        if effective_max_tokens % args.u != 0:
-            new_max = ((effective_max_tokens + args.u - 1) // args.u) * args.u
-            print(f"Note: --max-tokens ({effective_max_tokens}) is not divisible by u={args.u}. Adjusting to {new_max}.")
-            effective_max_tokens = new_max
-
     # Get dataset info
     dataset_name = args.dataset[0]
     dataset_subset = args.dataset[1]
@@ -192,7 +179,7 @@ def main():
 
     total_prompts = len(prompts)
     if args.verbose:
-        print(f"Generating {effective_max_tokens} tokens per prompt with BCH watermarking...")
+        print(f"Generating {args.u} tokens per prompt with BCH watermarking...")
         print(f"Using dataset: {dataset_name}")
         print(f"Processing {total_prompts} prompt(s) with model: {args.model}")
 
@@ -267,7 +254,7 @@ def main():
     successful_decodes = 0              # BCH decode succeeded AND matched original
     decode_failures = 0                 # BCH decode failed (too many errors)
     bit_errors_list = []                # For successful decodes
-    full_generation_prompts = 0         # Count prompts with full max-tokens generation
+    full_generation_prompts = 0         # Count prompts with full codeword-length generation
     properly_encoded_tokens = 0         # Across full-length generations only
     total_tokens_generated = 0          # Across full-length generations only
     bch_decode_times = []
@@ -304,14 +291,13 @@ def main():
             watermarker_config=watermarker_config,
             batch_items=batch_items,
             results_queue=results_queue,
-            effective_max_tokens=effective_max_tokens
         )
         num_active_workers = 1
     elif num_gpus <= 1:
         # Single GPU worker
         p = Process(
             target=gpu_generation_worker,
-            args=(watermarker_config, batch_items, results_queue, effective_max_tokens),
+            args=(watermarker_config, batch_items, results_queue),
             daemon=True,
         )
         p.start()
@@ -328,7 +314,7 @@ def main():
             worker_config = {**watermarker_config, 'device': f'cuda:{gpu_id}'}
             p = Process(
                 target=gpu_generation_worker,
-                args=(worker_config, worker_items, results_queue, effective_max_tokens),
+                args=(worker_config, worker_items, results_queue),
                 daemon=True,
             )
             p.start()
@@ -391,10 +377,10 @@ def main():
             print(f"{'_'*14}\n")
 
 
-        # Skip watermark recovery if generated text is shorter than max-tokens
-        if len(generated_ids) < effective_max_tokens:
+        # Skip watermark recovery if generated text is shorter than codeword length
+        if len(generated_ids) < args.u:
             if args.verbose:
-                print(f"Skipping watermark recovery for prompt {prompt_idx + 1}: generated {len(generated_ids)} tokens < {effective_max_tokens} max tokens")
+                print(f"Skipping watermark recovery for prompt {prompt_idx + 1}: generated {len(generated_ids)} tokens < {args.u} codeword length")
             processing_progress.update(1)
             processed_count += 1
             continue
@@ -404,12 +390,9 @@ def main():
 
         # Decode watermark bits from generated text
         if args.bypass_tokenization:
-            code_blocks, decoded_tokens_length, decoded_token_ids = decoder.decode(generated_ids)
+            decoded_codeword, decoded_tokens_length, decoded_token_ids = decoder.decode(generated_ids)
         else:
-            code_blocks, decoded_tokens_length, decoded_token_ids = decoder.decode(generated_text)
-
-        # Single block setup (legacy support for multi-block)
-        decoded_codeword = code_blocks[0]
+            decoded_codeword, decoded_tokens_length, decoded_token_ids = decoder.decode(generated_text)
 
         # Accumulate properly encoded token stats for full-length generations
         properly_encoded_tokens += generation_statistics.get("properly_encoded_tokens", 0)
@@ -499,8 +482,6 @@ def main():
         f.write(f"u (codeword length): {args.u}\n")
         f.write(f"BCH parameters: {format_bch_summary(bch_codec.params, args.n)}\n")
         f.write(f"Number of prompts: {total_prompts}\n")
-        f.write(f"Max tokens (requested): {args.max_tokens if args.max_tokens is not None else 'None (default -> u)'}\n")
-        f.write(f"Max tokens (effective): {effective_max_tokens}\n")
         f.write(f"Seed: {args.seed}\n")
         f.write(f"Secret key: {args.secret_key}\n")
         f.write(f"Green fraction: {args.green_fraction}\n")
@@ -605,8 +586,6 @@ def main():
             "shortening": bch_codec.params.shortening,
         },
         "generation": {
-            "max_tokens_requested": args.max_tokens,
-            "max_tokens_effective": effective_max_tokens,
             "context_window": args.context_window,
             "temperature": args.temperature,
             "hash_window": args.hash_window,

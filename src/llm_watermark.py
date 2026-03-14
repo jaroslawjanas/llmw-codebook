@@ -9,7 +9,7 @@ import random
 import torch
 import numpy as np
 import time
-from typing import List, Tuple, Dict, Optional, Union, Any
+from typing import List, Tuple, Dict, Optional, Union
 from abc import ABC, abstractmethod
 from itertools import combinations
 from transformers import (
@@ -332,206 +332,151 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         return modified_logits.unsqueeze(0).unsqueeze(0)
         
     def generate_text(
-        self, 
+        self,
         prompt: str,
         bit_code: List[int],
-        max_new_tokens: int
-    ) -> Tuple[str, str, List[int], str, Dict[str, int], List[Dict[str, Any]]]:
+    ) -> Tuple[str, str, List[int], str, Dict[str, int]]:
         """
-        Generate text with Lagrange interpolation watermarking.
-        
+        Generate watermarked text by encoding a single codeword (u tokens).
+
         Args:
             prompt: Input text prompt
-            max_new_tokens: Maximum number of tokens to generate
-            verbose: Whether to show progress bar
-            
+            bit_code: Binary codeword to encode (length must equal u)
+
         Returns:
-            Tuple of (full_text, generated_text, generated_ids, formatted_prompt, statistics, watermark_blocks_info)
+            Tuple of (full_text, generated_text, generated_ids, formatted_prompt, statistics)
         """
-
-
-        # Initialize tracking for watermark blocks
-        watermark_blocks_info = []
-        
         # Format the prompt for the specific model
         formatted_prompt = format_prompt_for_model(prompt, self.model_name, self.tokenizer, verbose=self.verbose)
-        
+
         # Tokenize the formatted prompt
         input_ids = self.tokenizer.encode(formatted_prompt, return_tensors="pt").to(self.device)
 
         # Store generated ids
         all_ids = input_ids.clone()[0].tolist()
-        
+
         # Initialize K/V cache
         past_key_values = None
-        cache_position = 0  # Track position in the cache
+        cache_position = 0
 
         assert len(bit_code) == self.u
-        
-        # Calculate number of complete blocks we can generate
-        if max_new_tokens % self.u != 0:
-            raise ValueError(f"max_new_tokens ({max_new_tokens}) must be divisible by 'u' ({self.u}) to encode the bit-code blocks.")
-        num_blocks = max_new_tokens // self.u
-        if num_blocks == 0:
-            raise ValueError(f"max_new_tokens ({max_new_tokens}) must be at least 'u' ({self.u}) to generate at least one bit-code block.")
-        
+
         # Setup progress tracking
-        progress_bar = tqdm(range(max_new_tokens), disable=not self.verbose)
+        progress_bar = tqdm(range(self.u), disable=not self.verbose)
         tokens_generated = 0
         green_tokens_selected = 0
         red_tokens_selected = 0
-        blocks_encoded = 0
         properly_encoded_tokens = 0
-        
-        # Generate tokens block by block
-        for block_idx in range(num_blocks):
 
-            # Track this block
-            block_info = {
-                "block_idx": block_idx,
-                "bit_code": bit_code,
-                "encoded_bits": [],
-                "tokens": []
-            }
-            
-            # Generate n tokens for this block (one for each bit of y)
-            for bit_idx in range(self.u):
-                # Prepare input for the model
-                if past_key_values is None:
-                    # First generation - use the full prompt
-                    # Only use the last context_window tokens if needed
-                    if len(all_ids) > self.context_window:
-                        model_input_ids = torch.tensor([all_ids[-self.context_window:]], device=self.device)
-                        cache_position = 0  # Reset cache position if we truncate
-                    else:
-                        model_input_ids = torch.tensor([all_ids], device=self.device)
+        # Generate u tokens, one per bit in the codeword
+        for bit_idx in range(self.u):
+            # Prepare input for the model
+            if past_key_values is None:
+                # First generation - use the full prompt
+                if len(all_ids) > self.context_window:
+                    model_input_ids = torch.tensor([all_ids[-self.context_window:]], device=self.device)
+                    cache_position = 0
                 else:
-                    # Subsequent generations - only use the last generated token
-                    model_input_ids = torch.tensor([[all_ids[-1]]], device=self.device)
-                    
-                    # Check if we need to trim the cache due to context window limits
-                    if cache_position >= self.context_window:
-                        # Trim the K/V cache to stay within context window
-                        # Keep only the most recent tokens
-                        trim_amount = cache_position - self.context_window + 1
-                        past_key_values = self._trim_past_key_values(past_key_values, trim_amount)
-                        cache_position = self.context_window - 1
-                
-                # Get logits from the model with K/V caching
-                with torch.no_grad():
-                    outputs = self.model(
-                        model_input_ids, 
-                        past_key_values=past_key_values,
-                        use_cache=True  # Enable K/V caching
-                    )
-                    logits = outputs.logits[:, -1:, :]  # Get logits of last token
-                    past_key_values = outputs.past_key_values  # Update cache
-                    cache_position += model_input_ids.shape[1]  # Update position
-                
-                # Determine bias type based on current bit
-                current_bit = bit_code[bit_idx]
-                bias_type = "green" if current_bit == 1 else "red"
-                
-                # For vocabulary splitting - use token_id = 0 for very first token, otherwise use previous generated token
-                if tokens_generated == 0:
-                    # Very first token being generated
-                    current_previous_token = 0
-                else:
-                    # Use the previous generated token (never use prompt tokens)
-                    current_previous_token = all_ids[-1]
-                
-                # Modify logits with watermark using the current previous token and secret key
-                modified_logits = self._modify_logits(logits, current_previous_token, bias_type)
-                
-                # Apply temperature if set
-                if self.temperature > 0:
-                    # Scale logits by temperature
-                    modified_logits = modified_logits / self.temperature
-                    
-                # Get probabilities through softmax
-                probs = torch.nn.functional.softmax(modified_logits, dim=-1)
-                
-                # Token sampling based on temperature
-                if self.temperature == 0 or self.temperature < 1e-6:
-                    # Greedy sampling (select token with highest probability)
-                    next_token_id = torch.argmax(probs, dim=-1).item()
-                else:
-                    # Sample from the distribution
-                    next_token_id = torch.multinomial(probs.squeeze(), 1).item()
-                
-                # Track whether the selected token was from the green or red list for watermark statistics
-                # Get the current division of tokens into green and red based on previous token and secret key
-                green_tokens, red_tokens = self._get_red_green_tokens(current_previous_token)
-                
-                # Check vocabulary bounds for safety
-                vocab_size = len(self.tokenizer)
-                if next_token_id < vocab_size:  # Make sure token is in vocabulary range
-                    # Create a tensor from the next token ID to enable vectorized comparison
-                    next_token_tensor = torch.tensor(next_token_id, device=self.device)
-                    
-                    # Use tensor operations to efficiently check if the token is in the green list
-                    is_green = (green_tokens == next_token_tensor).any().item()
-                    encoded_bit = 1 if is_green else 0
-                    
-                    if is_green:
-                        block_info["encoded_bits"].append(1)
-                        green_tokens_selected += 1
-                    else:
-                        block_info["encoded_bits"].append(0)
-                        red_tokens_selected += 1
-                    
-                    # Check if token was properly encoded (intended bit matches actual encoded bit)
-                    if current_bit == encoded_bit:
-                        properly_encoded_tokens += 1
+                    model_input_ids = torch.tensor([all_ids], device=self.device)
+            else:
+                # Subsequent generations - only use the last generated token
+                model_input_ids = torch.tensor([[all_ids[-1]]], device=self.device)
 
-                # Add the new token to generated ids
-                all_ids.append(next_token_id)
-                block_info["tokens"].append(next_token_id)
-                tokens_generated += 1
-                
-                # Update progress bar with stats
-                progress_bar.set_description(f"Encoding Block {block_idx+1}/{num_blocks}, Bit {bit_idx+1}/{self.u}, Green: {green_tokens_selected}, Red: {red_tokens_selected}")
-                progress_bar.update(1)
-                
-                # Check if we've reached an EOS token
-                if next_token_id == self.tokenizer.eos_token_id:
-                    break
-            
-            # Add completed block info
-            watermark_blocks_info.append(block_info)
-            blocks_encoded += 1
-            
-            # Check if we hit EOS in the middle of a block
-            if all_ids[-1] == self.tokenizer.eos_token_id:
+                # Check if we need to trim the cache due to context window limits
+                if cache_position >= self.context_window:
+                    trim_amount = cache_position - self.context_window + 1
+                    past_key_values = self._trim_past_key_values(past_key_values, trim_amount)
+                    cache_position = self.context_window - 1
+
+            # Get logits from the model with K/V caching
+            with torch.no_grad():
+                outputs = self.model(
+                    model_input_ids,
+                    past_key_values=past_key_values,
+                    use_cache=True
+                )
+                logits = outputs.logits[:, -1:, :]
+                past_key_values = outputs.past_key_values
+                cache_position += model_input_ids.shape[1]
+
+            # Determine bias type based on current bit
+            current_bit = bit_code[bit_idx]
+            bias_type = "green" if current_bit == 1 else "red"
+
+            # For vocabulary splitting - use token_id = 0 for very first token, otherwise use previous generated token
+            if tokens_generated == 0:
+                current_previous_token = 0
+            else:
+                current_previous_token = all_ids[-1]
+
+            # Modify logits with watermark
+            modified_logits = self._modify_logits(logits, current_previous_token, bias_type)
+
+            # Apply temperature if set
+            if self.temperature > 0:
+                modified_logits = modified_logits / self.temperature
+
+            # Get probabilities through softmax
+            probs = torch.nn.functional.softmax(modified_logits, dim=-1)
+
+            # Token sampling based on temperature
+            if self.temperature == 0 or self.temperature < 1e-6:
+                next_token_id = torch.argmax(probs, dim=-1).item()
+            else:
+                next_token_id = torch.multinomial(probs.squeeze(), 1).item()
+
+            # Track whether the selected token was from the green or red list
+            green_tokens, red_tokens = self._get_red_green_tokens(current_previous_token)
+
+            vocab_size = len(self.tokenizer)
+            if next_token_id < vocab_size:
+                next_token_tensor = torch.tensor(next_token_id, device=self.device)
+                is_green = (green_tokens == next_token_tensor).any().item()
+                encoded_bit = 1 if is_green else 0
+
+                if is_green:
+                    green_tokens_selected += 1
+                else:
+                    red_tokens_selected += 1
+
+                if current_bit == encoded_bit:
+                    properly_encoded_tokens += 1
+
+            # Add the new token to generated ids
+            all_ids.append(next_token_id)
+            tokens_generated += 1
+
+            # Update progress bar
+            progress_bar.set_description(f"Bit {bit_idx+1}/{self.u}, Green: {green_tokens_selected}, Red: {red_tokens_selected}")
+            progress_bar.update(1)
+
+            # Check if we've reached an EOS token
+            if next_token_id == self.tokenizer.eos_token_id:
                 break
-        
+
         progress_bar.close()
 
-        # Separate prompt from generated content using existing input_ids
-        prompt_length = len(input_ids[0])  # input_ids is a tensor with batch dimension
-        
-        # Split the generated_ids into prompt and generated portions
+        # Separate prompt from generated content
+        prompt_length = len(input_ids[0])
+
         if len(all_ids) > prompt_length:
             generated_ids = all_ids[prompt_length:]
             assert len(generated_ids) == tokens_generated
         else:
-            generated_ids = []  # No new tokens were generated
-        
-        # Decode both full text and generated-only text
+            generated_ids = []
+
         full_text = self.tokenizer.decode(all_ids, skip_special_tokens=True)
         generated_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True) if generated_ids else ""
-        
-        # Create statistics dictionary
+
         statistics = {
             "green_tokens": green_tokens_selected,
             "red_tokens": red_tokens_selected,
-            "blocks_encoded": blocks_encoded,
             "total_tokens_generated": tokens_generated,
             "green_ratio": green_tokens_selected / (green_tokens_selected + red_tokens_selected + 1e-10),
             "properly_encoded_tokens": properly_encoded_tokens
         }
 
-        return full_text, generated_text, generated_ids, formatted_prompt, statistics, watermark_blocks_info
+        return full_text, generated_text, generated_ids, formatted_prompt, statistics
 
 
 class LLMWatermarkDecoder(LLMWatermarkerBase):
@@ -570,7 +515,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         super().__init__(model_name, secret_key, n, u, green_list_fraction, seed, cache_dir, device, verbose)
 
         
-    def decode(self, generated: Union[str, List[int]]) -> Tuple[List[List[int]], int, List[int]]:
+    def decode(self, generated: Union[str, List[int]]) -> Tuple[List[int], int, List[int]]:
         """
         Decode watermark information from generated text or pre-tokenized IDs.
 
@@ -578,8 +523,8 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             generated: Union[str, List[int]] - Either the generated text (prompt removed) or a list of token IDs
 
         Returns:
-            Tuple of (blocks, decoded_tokens_length, token_ids):
-            - blocks: List of bit-code lists extracted from each complete block
+            Tuple of (bit_code, decoded_tokens_length, token_ids):
+            - bit_code: Extracted bit sequence (list of 0/1), may be shorter than u if fewer tokens available
             - decoded_tokens_length: Number of tokens used for decoding
             - token_ids: The token IDs used for decoding
         """
@@ -594,45 +539,16 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         else:
             raise TypeError(f"generated must be str or List[int], got {type(generated).__name__}")
 
-        # Calculate number of complete blocks
-        num_complete_blocks = len(token_ids) // self.u
-        
-        if num_complete_blocks < 1:
-            return [], 0, token_ids  # No complete blocks to decode
-        
-        blocks = []
-        
-        # Setup progress tracking for decoder
-        progress_bar = tqdm(range(num_complete_blocks), desc="Decoding Blocks", disable=not self.verbose)
-        
-        # Process each complete block
-        for block_idx in range(num_complete_blocks):
-            start_idx = block_idx * self.u
-            end_idx = start_idx + self.u
-            block_tokens = token_ids[start_idx:end_idx]
-            
-            # Extract bits by classifying each token as green (1) or red (0)
-            bit_code = []
-            for i, token_id in enumerate(block_tokens):
-                # Determine the previous token for vocabulary splitting
-                if start_idx + i == 0:
-                    # Very first token in the sequence
-                    vocab_split_token = 0
-                else:
-                    # Use the previous token in the sequence
-                    vocab_split_token = token_ids[start_idx + i - 1]
-                
-                # Get green and red token lists for this position
-                green_tokens, red_tokens = self._get_red_green_tokens(vocab_split_token)
-                
-                # Check if current token is in green list (1) or red list (0)
-                is_green = (green_tokens == token_id).any().item()
-                bit_code.append(1 if is_green else 0)
-            
-            # Store the extracted block information with lists for error correction variants
-            blocks.append(bit_code)
-            progress_bar.update(1)
-        
-        progress_bar.close()
-        
-        return blocks, decoded_tokens_length, token_ids
+        # Extract bits by classifying each token as green (1) or red (0)
+        bit_code = []
+        for i, token_id in enumerate(token_ids[:self.u]):
+            if i == 0:
+                vocab_split_token = 0
+            else:
+                vocab_split_token = token_ids[i - 1]
+
+            green_tokens, red_tokens = self._get_red_green_tokens(vocab_split_token)
+            is_green = (green_tokens == token_id).any().item()
+            bit_code.append(1 if is_green else 0)
+
+        return bit_code, decoded_tokens_length, token_ids
