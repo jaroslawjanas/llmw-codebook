@@ -21,6 +21,7 @@ dependencies:
   - scipy>=1.1
   - matplotlib>=3.10
   - seaborn>=0.13
+  - nltk>=3.8
   - numba>=0.61
   - rapidfuzz=3.14.3
   - c-compiler  # Needed by Triton to build CUDA utilities
@@ -33,4 +34,5 @@ dependencies:
     - galois==0.4.6
     # Triton (--distance levenshtein-triton): uncomment ONE line for your platform
     # - triton-windows>=3.0.0  # Windows
-    - triton>=3.0.0  # Linux (if libcuda.so missing: ln -s libcuda.so.1 libcuda.so)Sta
+    - triton>=3.0.0  # Linux (if libcuda.so missing: ln -s libcuda.so.1 libcuda.so)
+    - openai>=1.0.0  # Paraphrasing attack API (OpenRouter / any OpenAI-compatible provider)

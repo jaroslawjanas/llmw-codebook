@@ -1,21 +1,17 @@
 #!/usr/bin/env python3
 """
-Attack Robustness Analysis Script.
+Word-Level Attack Robustness Analysis Script.
 
-Tests how watermark detection degrades under substitution, insertion, and
-deletion attacks applied to decoded codewords, reporting match rate at a fixed
-FPR threshold.
+Tests how watermark detection degrades under word-level attacks applied to
+generated text, reporting match rate (recovered watermark == original).
 
-Supports both Hamming and Levenshtein distance metrics.
-
-For Hamming (fixed-length): insertions are truncated, deletions are zero-padded
-to maintain length u. For Levenshtein (variable-length): attacked codewords are
-passed as-is since edit distance naturally handles length changes.
+Four attacks: word deletion, word insertion, synonym replacement, paraphrasing.
 
 Usage examples:
-  python scripts/attack_robustness.py --n 20 --u 128 --z 10000 --distance hamming --attack-budget 0.1 --verbose
-  python scripts/attack_robustness.py --n 20 --u 128 --z 10000 --distance levenshtein --attack-budget 1 4 9 13 --verbose
-  python scripts/attack_robustness.py --n 20 --u 128 --z 10000 --distance hamming --attack-budget 1 3 5 7 10 --fpr-target 0.01
+  python scripts/attack_robustness.py --input-dir output/some_experiment --attack-budget 0.1 --verbose
+  python scripts/attack_robustness.py --input-dir output/some_experiment --attack-budget 0.2 --attacks deletion insertion synonym
+  python scripts/attack_robustness.py --input-dir output/some_experiment --attack-budget 0.1 --attacks paraphrase \
+      --api-base-url https://openrouter.ai/api/v1 --api-key $OPENROUTER_API_KEY --paraphrase-model openai/gpt-4o-mini
 """
 
 from __future__ import annotations
@@ -23,9 +19,9 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time as time_mod
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
 
 # Project root (one level up from scripts/)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -34,18 +30,13 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import torch
 from tqdm import tqdm
 
 import src.paths as paths
-from scripts.matchrate_at_fpr import (
-    find_threshold,
-    load_or_generate_negatives,
-    load_positive_data,
-    sanitize_filename,
-    shorten_model_name,
-)
 from scripts.utils import (
     create_triton_codebooks,
+    load_experiment,
     multi_gpu_triton_batch_search,
     resolve_triton_gpu_count,
 )
@@ -57,6 +48,7 @@ from src.codebooks import (
     LinearCodeGenerator,
     RNGCodewordGenerator,
 )
+from src.llm_watermark import LLMWatermarkDecoder
 
 
 # ---------------------------------------------------------------------------
@@ -65,407 +57,807 @@ from src.codebooks import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Test codebook watermark robustness against substitution, insertion, and deletion attacks"
+        description="Word-level attack robustness analysis for watermarked text"
     )
     # Required
-    parser.add_argument("--n", type=int, required=True, help="Codebook size parameter (2^n entries)")
-    parser.add_argument("--u", type=int, required=True, help="Code length in bits")
-    parser.add_argument("--distance", type=str, required=True, choices=["hamming", "levenshtein", "levenshtein-triton"], help="Distance metric")
-    parser.add_argument("--z", type=int, required=True, help="Number of random negative samples for FPR threshold")
-
-    # Attack parameters
     parser.add_argument(
-        "--attack-budget", type=float, nargs="+", required=True,
-        help="Attack budgets. A single value < 1.0 is a fraction of u and generates range 0..ceil(frac*u) "
-             "(e.g., 0.1 = every budget from 0 to ceil(10%%*u)). "
-             "Integer values are specific bit counts (e.g., 1 4 9 13). Budget 0 is always included.",
+        "--input-dir", type=str, required=True,
+        help="Path to experiment output directory (must contain config.json and generations.csv)",
+    )
+    parser.add_argument(
+        "--attack-budget", type=float, required=True,
+        help="Fraction of tokens to affect (e.g., 0.1 = 10%%)",
     )
 
-    # Codebook parameters
-    parser.add_argument("--codebook-generation", type=str, default="linear", choices=["rng", "bch", "linear"], help="Codeword generation algorithm (default: linear)")
-    parser.add_argument("--secret-key", type=str, default="25111915", help="Codebook secret key (default: 25111915)")
-    parser.add_argument("--bch-m", type=int, default=None, help="BCH field degree m (n0=2^m-1). If None, auto-select optimal")
+    # Attack selection
+    parser.add_argument(
+        "--attacks", type=str, nargs="+",
+        default=["deletion", "insertion", "synonym", "paraphrase"],
+        choices=["deletion", "insertion", "synonym", "paraphrase"],
+        help="Attack types to run (default: all four)",
+    )
 
-    # FPR parameters
-    parser.add_argument("--fpr-target", type=float, default=0.01, help="Target FPR (default: 0.01)")
+    # Paraphrasing API
+    parser.add_argument("--api-base-url", type=str, default=None,
+        help="OpenAI-compatible API base URL (e.g., https://openrouter.ai/api/v1)")
+    parser.add_argument("--api-key", type=str, default=None,
+        help="API key for paraphrasing (falls back to OPENROUTER_API_KEY env var)")
+    parser.add_argument("--paraphrase-model", type=str, default=None,
+        help="Model name for paraphrasing (e.g., openai/gpt-4o-mini)")
+    parser.add_argument("--paraphrase-timeout", type=float, default=30.0,
+        help="Timeout in seconds for paraphrase API calls (default: 30)")
+
+    # Search configuration
+    parser.add_argument(
+        "--distance", type=str, default=None,
+        choices=["hamming", "levenshtein", "levenshtein-triton"],
+        help="Override distance metric (defaults to value in config.json)",
+    )
+    parser.add_argument("--num-gpus", type=int, default=0,
+        help="Number of GPUs for Triton search (0 = all available, default: 0)")
+
+    # Reproducibility
     parser.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
 
-    # Data parameters
-    parser.add_argument("--output-root", type=str, default="output", help="Root directory with experiment outputs (default: output)")
-    parser.add_argument("--save-dir", type=str, default="output", help="Directory to save analysis outputs (default: output)")
-    parser.add_argument("--include-models", type=str, nargs="+", default=None, help="Substring filter for model names")
-
-    # GPU
-    parser.add_argument("--num-gpus", type=int, default=0, help="Number of GPUs for Triton search (0 = all available, default: 0)")
-
-    # Display
+    # Output
+    parser.add_argument("--save-dir", type=str, default="output",
+        help="Directory to save analysis outputs (default: output)")
     parser.add_argument("--verbose", action="store_true", help="Show detailed progress")
     parser.add_argument("--show", action="store_true", help="Display plots interactively")
 
     args = parser.parse_args()
 
-    # Resolve budgets: single fraction → range, otherwise explicit bit values
-    raw = args.attack_budget
-    if len(raw) == 1 and raw[0] < 1.0:
-        # Percentage mode: generate range 0..ceil(frac * u)
-        import math
-        max_budget = math.ceil(raw[0] * args.u)
-        budgets = list(range(0, max_budget + 1))
-    else:
-        # Explicit bit values
-        budgets = sorted(set([0] + [int(b) for b in raw]))
-
-    if any(b < 0 for b in budgets):
-        parser.error("Attack budgets must be non-negative")
-    args.budgets = budgets
-    args.max_budget = budgets[-1]
+    # Validate paraphrase requirements
+    if "paraphrase" in args.attacks:
+        api_key = args.api_key or os.environ.get("OPENROUTER_API_KEY")
+        if not all([args.api_base_url, api_key, args.paraphrase_model]):
+            parser.error(
+                "--api-base-url, --api-key (or OPENROUTER_API_KEY env var), and "
+                "--paraphrase-model are required for paraphrase attack"
+            )
+        # Resolve API key from env if not provided via CLI
+        if args.api_key is None:
+            args.api_key = api_key
 
     return args
 
 
 # ---------------------------------------------------------------------------
-# Attack functions (metric-agnostic)
+# NLTK setup
 # ---------------------------------------------------------------------------
 
-def apply_substitution_attack(
-    codeword: np.ndarray, budget: int, rng: np.random.Generator
-) -> np.ndarray:
-    """Flip `budget` random bits. Returns array of length u (unchanged)."""
-    if budget == 0:
-        return codeword.copy()
-    attacked = codeword.copy()
-    indices = rng.choice(len(codeword), size=min(budget, len(codeword)), replace=False)
-    attacked[indices] = 1 - attacked[indices]
-    return attacked
+def _ensure_nltk_data(resources: list[str]) -> None:
+    """Download NLTK data to cache/nltk/ if not already present."""
+    import nltk
 
+    nltk_dir = os.path.abspath(paths.NLTK_CACHE_DIR)
+    os.makedirs(nltk_dir, exist_ok=True)
 
-def apply_insertion_attack(
-    codeword: np.ndarray, budget: int, rng: np.random.Generator
-) -> np.ndarray:
-    """Insert `budget` random bits at random positions. Returns array of length u + budget."""
-    if budget == 0:
-        return codeword.copy()
-    result = list(codeword)
-    for _ in range(budget):
-        pos = rng.integers(0, len(result) + 1)
-        bit = int(rng.integers(0, 2))
-        result.insert(pos, bit)
-    return np.array(result, dtype=np.uint8)
+    # Prepend our cache dir so nltk finds data there
+    if nltk_dir not in nltk.data.path:
+        nltk.data.path.insert(0, nltk_dir)
 
-
-def apply_deletion_attack(
-    codeword: np.ndarray, budget: int, rng: np.random.Generator
-) -> np.ndarray:
-    """Delete `budget` random bits. Returns array of length u - budget."""
-    if budget == 0:
-        return codeword.copy()
-    u = len(codeword)
-    n_to_delete = min(budget, u - 1)  # Keep at least 1 bit
-    delete_indices = set(rng.choice(u, size=n_to_delete, replace=False).tolist())
-    result = [codeword[i] for i in range(u) if i not in delete_indices]
-    return np.array(result, dtype=np.uint8)
+    for resource in resources:
+        try:
+            nltk.data.find(resource)
+        except LookupError:
+            nltk.download(resource.split("/")[-1], download_dir=nltk_dir, quiet=True)
 
 
 # ---------------------------------------------------------------------------
-# Metric-specific adaptation
+# Attack functions
 # ---------------------------------------------------------------------------
 
-def adapt_for_hamming(attacked: np.ndarray, u: int) -> np.ndarray:
-    """Truncate or pad to exactly length u for Hamming search."""
-    if len(attacked) == u:
-        return attacked
-    elif len(attacked) > u:
-        return attacked[:u]
+def apply_word_deletion(
+    text: str,
+    attack_budget: float,
+    tokenizer,
+    rng: np.random.Generator,
+) -> tuple[str, int]:
+    """
+    Delete random words until token budget is met.
+
+    Returns:
+        (attacked_text, tokens_affected)
+    """
+    words = text.split()
+    if len(words) <= 1:
+        return text, 0
+
+    total_tokens = len(tokenizer.encode(text, add_special_tokens=False))
+    target_tokens = int(attack_budget * total_tokens)
+    if target_tokens <= 0:
+        return text, 0
+
+    available_indices = list(range(len(words)))
+    rng.shuffle(available_indices)
+
+    tokens_affected = 0
+    indices_to_delete: set[int] = set()
+
+    for idx in available_indices:
+        if tokens_affected >= target_tokens:
+            break
+        word_tokens = len(tokenizer.encode(words[idx], add_special_tokens=False))
+        indices_to_delete.add(idx)
+        tokens_affected += word_tokens
+
+    remaining = [w for i, w in enumerate(words) if i not in indices_to_delete]
+    # Keep at least one word
+    if not remaining:
+        kept_idx = available_indices[-1]  # Last one added, remove it from deletion
+        remaining = [words[kept_idx]]
+        tokens_affected -= len(tokenizer.encode(words[kept_idx], add_special_tokens=False))
+
+    return " ".join(remaining), tokens_affected
+
+
+def apply_word_insertion(
+    text: str,
+    attack_budget: float,
+    tokenizer,
+    rng: np.random.Generator,
+    word_pool: list[str],
+) -> tuple[str, int]:
+    """
+    Insert random words from the pool until token budget is met.
+
+    Returns:
+        (attacked_text, tokens_affected)
+    """
+    words = text.split()
+    total_tokens = len(tokenizer.encode(text, add_special_tokens=False))
+    target_tokens = int(attack_budget * total_tokens)
+    if target_tokens <= 0:
+        return text, 0
+
+    result = list(words)
+    tokens_affected = 0
+    pool_size = len(word_pool)
+
+    while tokens_affected < target_tokens:
+        insert_word = word_pool[rng.integers(pool_size)]
+        insert_pos = rng.integers(len(result) + 1)
+        word_tokens = len(tokenizer.encode(insert_word, add_special_tokens=False))
+        result.insert(insert_pos, insert_word)
+        tokens_affected += word_tokens
+
+    return " ".join(result), tokens_affected
+
+
+def _pos_to_wordnet(tag: str):
+    """Map Penn Treebank POS tag to WordNet POS constant."""
+    from nltk.corpus import wordnet
+
+    if tag.startswith("J"):
+        return wordnet.ADJ
+    elif tag.startswith("V"):
+        return wordnet.VERB
+    elif tag.startswith("N"):
+        return wordnet.NOUN
+    elif tag.startswith("R"):
+        return wordnet.ADV
+    return None
+
+
+def _get_synonyms(word: str, pos) -> list[str]:
+    """Get single-word synonyms for a word with optional POS filter."""
+    from nltk.corpus import wordnet
+
+    synonyms: set[str] = set()
+    synsets = wordnet.synsets(word, pos=pos) if pos else wordnet.synsets(word)
+    for syn in synsets:
+        for lemma in syn.lemmas():
+            name = lemma.name()
+            if name.lower() != word.lower() and "_" not in name:
+                synonyms.add(name)
+    return list(synonyms)
+
+
+def apply_synonym_replace(
+    text: str,
+    attack_budget: float,
+    tokenizer,
+    rng: np.random.Generator,
+) -> tuple[str, int]:
+    """
+    Replace words with WordNet synonyms until token budget is met.
+
+    Uses text.split() instead of nltk.word_tokenize() to avoid contraction
+    splitting issues ("don't" -> "do n't" -> corrupted on rejoin).
+
+    Returns:
+        (attacked_text, tokens_affected)
+    """
+    import nltk
+
+    words = text.split()
+    total_tokens = len(tokenizer.encode(text, add_special_tokens=False))
+    target_tokens = int(attack_budget * total_tokens)
+    if target_tokens <= 0:
+        return text, 0
+
+    # POS-tag for better synonym quality
+    tagged = nltk.pos_tag(words)
+
+    # Build candidate list: (word_index, original_word, synonyms)
+    candidates = []
+    for i, (word, tag) in enumerate(tagged):
+        wn_pos = _pos_to_wordnet(tag)
+        syns = _get_synonyms(word, wn_pos)
+        if syns:
+            candidates.append((i, word, syns))
+
+    if not candidates:
+        return text, 0
+
+    # Shuffle candidates
+    candidate_order = list(range(len(candidates)))
+    rng.shuffle(candidate_order)
+
+    tokens_affected = 0
+    result_words = list(words)
+
+    for ci in candidate_order:
+        if tokens_affected >= target_tokens:
+            break
+        idx, orig_word, syns = candidates[ci]
+        synonym = syns[rng.integers(len(syns))]
+        result_words[idx] = synonym
+        orig_tokens = len(tokenizer.encode(orig_word, add_special_tokens=False))
+        tokens_affected += orig_tokens
+
+    return " ".join(result_words), tokens_affected
+
+
+def _call_paraphrase_api(client, model_name: str, text: str, timeout: float, max_retries: int = 3) -> str:
+    """Call OpenAI-compatible API with retries and exponential backoff."""
+    for attempt in range(max_retries):
+        try:
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a text rewriter. Rewrite the following text while "
+                            "preserving its meaning. Output only the rewritten text, nothing else."
+                        ),
+                    },
+                    {"role": "user", "content": text},
+                ],
+                timeout=timeout,
+                temperature=0.7,
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            if attempt < max_retries - 1:
+                time_mod.sleep(2 ** attempt)
+            else:
+                raise RuntimeError(f"Paraphrase API failed after {max_retries} retries: {e}")
+
+
+def apply_paraphrase(
+    text: str,
+    attack_budget: float,
+    tokenizer,
+    rng: np.random.Generator,
+    client,
+    model_name: str,
+    timeout: float,
+) -> tuple[str, int]:
+    """
+    Select a contiguous region of words, expand until token budget is met,
+    then paraphrase via API.
+
+    Returns:
+        (attacked_text, tokens_affected)
+    """
+    words = text.split()
+    if len(words) <= 2:
+        return text, 0
+
+    total_tokens = len(tokenizer.encode(text, add_special_tokens=False))
+    target_tokens = int(attack_budget * total_tokens)
+    if target_tokens <= 0:
+        return text, 0
+
+    # Start from a random center, expand alternating left/right
+    center = int(rng.integers(len(words)))
+    left = center
+    right = center  # inclusive
+
+    region_text = words[center]
+    region_tokens = len(tokenizer.encode(region_text, add_special_tokens=False))
+
+    expand_left = True
+    while region_tokens < target_tokens:
+        expanded = False
+        if expand_left and left > 0:
+            left -= 1
+            expanded = True
+        elif not expand_left and right < len(words) - 1:
+            right += 1
+            expanded = True
+        elif expand_left and right < len(words) - 1:
+            # Can't go left, try right instead
+            right += 1
+            expanded = True
+        elif not expand_left and left > 0:
+            # Can't go right, try left instead
+            left -= 1
+            expanded = True
+
+        if not expanded:
+            break  # Boundaries reached on both sides
+
+        region_text = " ".join(words[left : right + 1])
+        region_tokens = len(tokenizer.encode(region_text, add_special_tokens=False))
+        expand_left = not expand_left
+
+    # Call API to paraphrase the selected region
+    selected_text = " ".join(words[left : right + 1])
+    paraphrased = _call_paraphrase_api(client, model_name, selected_text, timeout)
+
+    # Reconstruct: prefix + paraphrased + suffix
+    prefix_words = words[:left]
+    suffix_words = words[right + 1 :]
+    parts = []
+    if prefix_words:
+        parts.append(" ".join(prefix_words))
+    parts.append(paraphrased)
+    if suffix_words:
+        parts.append(" ".join(suffix_words))
+    attacked_text = " ".join(parts)
+
+    return attacked_text.strip(), region_tokens
+
+
+# ---------------------------------------------------------------------------
+# Codebook search helpers
+# ---------------------------------------------------------------------------
+
+def _adapt_for_hamming(query: np.ndarray, u: int) -> np.ndarray:
+    """Pad or truncate a bit array to exactly length u for Hamming search."""
+    if len(query) == u:
+        return query
+    elif len(query) > u:
+        return query[:u]
     else:
         padded = np.zeros(u, dtype=np.uint8)
-        padded[: len(attacked)] = attacked
+        padded[: len(query)] = query
         return padded
+
+
+def _batch_search(
+    queries: list[np.ndarray],
+    codebook,
+    codebooks: list | None,
+    base_codebook: CodebookBase,
+    u: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Run batch codebook search across all decoded queries.
+
+    Returns:
+        (retrieved_watermarks, distances) — both 1D arrays of length len(queries)
+    """
+    if not queries:
+        return np.array([], dtype=np.int64), np.array([], dtype=np.int32)
+
+    if isinstance(codebook, CodebookHamming):
+        adapted = np.stack([_adapt_for_hamming(q, u) for q in queries])
+        packed = CodebookBase._pack_bits_2d(adapted, u)
+        dist_arr, idx_arr = codebook.index.search(packed, 1)
+        distances = dist_arr[:, 0].astype(np.int32)
+        retrieved_watermarks = base_codebook.watermark_identities[idx_arr[:, 0]]
+    elif codebooks and len(codebooks) > 1:
+        _, retrieved_watermarks, distances = multi_gpu_triton_batch_search(codebooks, queries)
+    else:
+        # Use individual queries to avoid Numba type-unification issue in batch mode
+        n_queries = len(queries)
+        retrieved_watermarks = np.empty(n_queries, dtype=np.int64)
+        distances = np.empty(n_queries, dtype=np.int32)
+        for i, q in enumerate(queries):
+            _, wm, dist = codebook.find_closest_match(q)
+            retrieved_watermarks[i] = wm
+            distances[i] = dist
+
+    return np.asarray(retrieved_watermarks, dtype=np.int64), np.asarray(distances, dtype=np.int32)
 
 
 # ---------------------------------------------------------------------------
 # Core evaluation
 # ---------------------------------------------------------------------------
 
-def _bits_to_str(arr: np.ndarray) -> str:
-    """Convert a uint8 bit array to a bitstring like '01101'."""
-    return "".join(str(int(b)) for b in arr)
-
-
-def evaluate_attack_robustness(
-    decoded_codewords: list[np.ndarray],
-    original_watermarks: np.ndarray,
-    original_codewords: list[str],
-    total_samples: int,
+def compute_baseline(
+    generations_df: pd.DataFrame,
+    decoder: LLMWatermarkDecoder,
     codebook,
-    attack_fn: Callable[[np.ndarray, int, np.random.Generator], np.ndarray],
-    budgets: list[int],
-    threshold: int,
+    codebooks: list | None,
+    base_codebook: CodebookBase,
     u: int,
-    seed: int,
-    attack_name: str,
-    codebooks: list | None = None,
-) -> tuple[dict[int, float], list[dict]]:
+    verbose: bool = False,
+) -> dict:
     """
-    Evaluate match rate at each specified budget level.
+    Decode original (unattacked) texts and search codebook. Returns baseline stats.
+    """
+    queries = []
+    watermarks = []
 
-    Args:
-        decoded_codewords: Decoded codewords from successful watermark samples only.
-        original_watermarks: Original watermark identities for each decoded codeword.
-        original_codewords: Bitstrings of the original codebook codewords (pre-computed).
-        total_samples: Total number of samples (all rows) for match rate denominator.
-        codebook: CodebookHamming or CodebookLevenshtein instance.
-        attack_fn: Attack function to apply.
-        budgets: List of budget values to evaluate (must include 0 for baseline).
-        threshold: Distance threshold from FPR analysis.
-        u: Codeword length.
-        seed: Random seed.
-        attack_name: Name for progress bar display.
+    for _, row in tqdm(
+        generations_df.iterrows(), total=len(generations_df),
+        desc="  baseline decode", disable=not verbose,
+    ):
+        text = str(row["generated_text"])
+        bit_seq, _, _ = decoder.decode(text)
+        queries.append(np.array(bit_seq, dtype=np.uint8))
+        watermarks.append(int(row["watermark"]))
+
+    watermarks_arr = np.array(watermarks, dtype=np.int64)
+    retrieved_wm, distances = _batch_search(queries, codebook, codebooks, base_codebook, u)
+
+    matches = retrieved_wm == watermarks_arr
+    return {
+        "total": len(watermarks),
+        "match_rate": float(matches.mean()) if len(matches) > 0 else 0.0,
+        "avg_distance": float(distances.mean()) if len(distances) > 0 else 0.0,
+        "matches": int(matches.sum()),
+    }
+
+
+def evaluate_attacks(
+    generations_df: pd.DataFrame,
+    decoder: LLMWatermarkDecoder,
+    codebook,
+    codebooks: list | None,
+    base_codebook: CodebookBase,
+    u: int,
+    attack_budget: float,
+    attacks: list[str],
+    seed: int,
+    word_pool: list[str] | None = None,
+    client=None,
+    paraphrase_model: str = "",
+    paraphrase_timeout: float = 30.0,
+    verbose: bool = False,
+) -> dict[str, pd.DataFrame]:
+    """
+    Run requested attacks on all samples.
 
     Returns:
-        Tuple of (budget_to_tpr dict, per-sample detail rows).
+        dict mapping attack_name -> DataFrame of per-sample results.
     """
-    is_hamming = isinstance(codebook, CodebookHamming)
-    results = {}
-    detail_rows: list[dict] = []
+    results: dict[str, pd.DataFrame] = {}
 
-    for budget in tqdm(budgets, desc=f"  {attack_name}"):
-        rng = np.random.default_rng(seed + budget)
+    for attack_idx, attack_name in enumerate(attacks):
+        rng = np.random.default_rng(seed + attack_idx)
 
-        if is_hamming:
-            # Batch: collect all attacked codewords, pack, search in one Faiss call
-            attacked_list = []
-            for cw in decoded_codewords:
-                attacked = attack_fn(cw, budget, rng)
-                adapted = adapt_for_hamming(attacked, u)
-                attacked_list.append(adapted)
+        records = []
+        queries = []
+        query_indices = []  # Track which records have valid queries
 
-            if attacked_list:
-                attacked_matrix = np.stack(attacked_list)
-                queries = CodebookBase._pack_bits_2d(attacked_matrix, u)
-                distances_arr, indices = codebook.index.search(queries, 1)
-                retrieved_wm = codebook.base.watermark_identities[indices[:, 0]]
-                dist_flat = distances_arr[:, 0]
-                correct_id = (retrieved_wm == original_watermarks)
-                tp = int((correct_id & (dist_flat <= threshold)).sum())
+        for row_idx, (_, row) in enumerate(tqdm(
+            generations_df.iterrows(), total=len(generations_df),
+            desc=f"  {attack_name}", disable=not verbose,
+        )):
+            original_text = str(row["generated_text"])
+            original_watermark = int(row["watermark"])
+            total_tokens = len(decoder.tokenizer.encode(original_text, add_special_tokens=False))
 
-                for i in range(len(attacked_list)):
-                    rec_cw = codebook.base.get_codeword_by_index(int(retrieved_wm[i]))
-                    detail_rows.append({
-                        "sample_index": i,
-                        "budget": budget,
-                        "original_watermark": int(original_watermarks[i]),
-                        "original_codeword": original_codewords[i],
-                        "decoded_codeword": _bits_to_str(decoded_codewords[i]),
-                        "attacked_codeword": _bits_to_str(attacked_list[i]),
-                        "recovered_watermark": int(retrieved_wm[i]),
-                        "recovered_codeword": _bits_to_str(rec_cw),
-                        "distance": int(dist_flat[i]),
-                        "successful_watermark": bool(correct_id[i]),
-                    })
-            else:
-                tp = 0
-        else:
-            # Levenshtein: batch search (handles variable-length codewords)
-            attacked_list = [attack_fn(cw, budget, rng) for cw in decoded_codewords]
-            if attacked_list:
-                if codebooks and len(codebooks) > 1:
-                    best_indices, retrieved_wm, dist_arr = multi_gpu_triton_batch_search(
-                        codebooks, attacked_list,
-                    )
+            record = {
+                "sample_index": row_idx,
+                "attack_type": attack_name,
+                "original_watermark": original_watermark,
+                "total_tokens": total_tokens,
+            }
+
+            # Skip very short texts
+            words = original_text.split()
+            if len(words) < 3:
+                record.update({
+                    "recovered_watermark": -1, "distance": -1, "success": False,
+                    "tokens_affected": 0, "original_text": original_text,
+                    "attacked_text": original_text, "skipped": True,
+                    "skip_reason": "text too short",
+                })
+                records.append(record)
+                continue
+
+            # Apply attack
+            try:
+                if attack_name == "deletion":
+                    attacked_text, tokens_affected = apply_word_deletion(
+                        original_text, attack_budget, decoder.tokenizer, rng)
+                elif attack_name == "insertion":
+                    attacked_text, tokens_affected = apply_word_insertion(
+                        original_text, attack_budget, decoder.tokenizer, rng, word_pool)
+                elif attack_name == "synonym":
+                    attacked_text, tokens_affected = apply_synonym_replace(
+                        original_text, attack_budget, decoder.tokenizer, rng)
+                elif attack_name == "paraphrase":
+                    attacked_text, tokens_affected = apply_paraphrase(
+                        original_text, attack_budget, decoder.tokenizer, rng,
+                        client, paraphrase_model, paraphrase_timeout)
                 else:
-                    best_indices, retrieved_wm, dist_arr = codebook.find_closest_match_batch(attacked_list)
-                correct_id = (retrieved_wm == original_watermarks)
-                tp = int((correct_id & (dist_arr <= threshold)).sum())
+                    raise ValueError(f"Unknown attack: {attack_name}")
+            except Exception as e:
+                record.update({
+                    "recovered_watermark": -1, "distance": -1, "success": False,
+                    "tokens_affected": 0, "original_text": original_text,
+                    "attacked_text": "", "skipped": True,
+                    "skip_reason": str(e),
+                })
+                records.append(record)
+                continue
 
-                for i in range(len(attacked_list)):
-                    rec_cw = codebook.base.get_codeword_by_index(int(best_indices[i]))
-                    detail_rows.append({
-                        "sample_index": i,
-                        "budget": budget,
-                        "original_watermark": int(original_watermarks[i]),
-                        "original_codeword": original_codewords[i],
-                        "decoded_codeword": _bits_to_str(decoded_codewords[i]),
-                        "attacked_codeword": _bits_to_str(attacked_list[i]),
-                        "recovered_watermark": int(retrieved_wm[i]),
-                        "recovered_codeword": _bits_to_str(rec_cw),
-                        "distance": int(dist_arr[i]),
-                        "successful_watermark": bool(correct_id[i]),
-                    })
-            else:
-                tp = 0
+            record.update({
+                "tokens_affected": tokens_affected,
+                "original_text": original_text,
+                "attacked_text": attacked_text,
+                "skipped": False,
+                "skip_reason": "",
+            })
 
-        match_rate_at_fpr = tp / total_samples if total_samples > 0 else 0.0
-        results[budget] = match_rate_at_fpr
+            # Decode attacked text
+            bit_seq, _, _ = decoder.decode(attacked_text)
+            queries.append(np.array(bit_seq, dtype=np.uint8))
+            query_indices.append(len(records))
+            records.append(record)
 
-    return results, detail_rows
+        # Batch codebook search for all non-skipped samples
+        if queries:
+            retrieved_wm, distances = _batch_search(
+                queries, codebook, codebooks, base_codebook, u)
 
+            for j, rec_idx in enumerate(query_indices):
+                rec = records[rec_idx]
+                rec["recovered_watermark"] = int(retrieved_wm[j])
+                rec["distance"] = int(distances[j])
+                rec["success"] = int(retrieved_wm[j]) == rec["original_watermark"]
 
-# ---------------------------------------------------------------------------
-# Plotting
-# ---------------------------------------------------------------------------
+        results[attack_name] = pd.DataFrame(records)
 
-def create_model_plot(
-    model: str,
-    attack_results: dict[str, dict[int, float]],
-    actual_fpr: float,
-    args: argparse.Namespace,
-    save_path: str,
-) -> None:
-    """Create PNG with 3 subplots: substitution, insertion, deletion."""
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-
-    for (attack_name, results), ax in zip(attack_results.items(), axes):
-        budgets = list(results.keys())
-        tpr_pcts = [r * 100 for r in results.values()]
-        baseline = tpr_pcts[0]
-
-        ax.plot(budgets, tpr_pcts, "-", color="#4A90D9", linewidth=1.5)
-        ax.plot(budgets[1:], tpr_pcts[1:], "o", color="#4A90D9", markersize=5)
-
-        # Baseline
-        ax.axhline(y=baseline, color="green", linestyle="--", linewidth=1.5, alpha=0.8)
-        ax.text(
-            budgets[-1] - 0.5, baseline - 4, f"{baseline:.1f}%",
-            color="green", fontsize=9, ha="right", va="top",
-        )
-
-        # Percentage labels for each point (skip first — shown by baseline)
-        for x, y in zip(budgets[1:], tpr_pcts[1:]):
-            y_offset = 5 if y < 90 else -12
-            ax.annotate(
-                f"{y:.0f}%", (x, y), textcoords="offset points",
-                xytext=(0, y_offset), ha="center", fontsize=7, color="#333333",
-            )
-
-        ax.set_xlabel("Number of adversarial interventions")
-        ax.set_ylabel(f"Match Rate @ FPR={actual_fpr * 100:.2f}%")
-        ax.set_title(attack_name)
-        ax.set_ylim(0, 105)
-        ax.set_xlim(budgets[0], budgets[-1])
-        if len(budgets) <= 20:
-            ax.set_xticks(budgets)
-        ax.grid(True, alpha=0.3)
-
-    plt.suptitle(
-        f"Attack Robustness: {shorten_model_name(model)}\n"
-        f"(n={args.n}, u={args.u}, dist={args.distance}, FPR={actual_fpr * 100:.2f}%)",
-        fontsize=12, fontweight="bold",
-    )
-    plt.tight_layout()
-    fig.savefig(save_path, dpi=300, bbox_inches="tight")
-    if args.show:
-        plt.show()
-    plt.close(fig)
+    return results
 
 
 # ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------
 
+def _shorten_model_name(name: str) -> str:
+    """Shorten HuggingFace model name for display."""
+    return name.split("/")[-1] if "/" in name else name
+
+
+def write_detail_csvs(
+    attack_results: dict[str, pd.DataFrame],
+    output_dir: str,
+) -> None:
+    """Write per-attack detail CSVs."""
+    for attack_name, df in attack_results.items():
+        csv_path = os.path.join(output_dir, f"detail_{attack_name}.csv")
+        df.to_csv(csv_path, index=False)
+
+
 def write_results_txt(
     args: argparse.Namespace,
-    threshold: int,
-    actual_fpr: float,
-    all_results: dict[str, dict[str, dict[int, float]]],
-    save_path: str,
+    config: dict,
+    baseline: dict,
+    attack_results: dict[str, pd.DataFrame],
+    output_dir: str,
 ) -> None:
-    """Write formatted results with one table per attack type."""
-    lines = []
-    lines.append("=" * 70)
-    lines.append("Codebook Attack Robustness Analysis")
-    lines.append("=" * 70)
+    """Write summary results text file."""
+    wm = config["watermark"]
+    model_name = _shorten_model_name(config["model"]["name"])
+    distance = args.distance or wm.get("distance", "hamming")
+
+    lines = [
+        "=" * 70,
+        "Word-Level Attack Robustness Analysis",
+        "=" * 70,
+        "",
+        f"Experiment:  {args.input_dir}",
+        f"Model:       {model_name}",
+        f"Parameters:  n={wm['n']}, u={wm['u']}, distance={distance}",
+        f"Budget:      {args.attack_budget} ({args.attack_budget * 100:.0f}% of tokens)",
+        f"Seed:        {args.seed}",
+        "",
+        "-" * 70,
+        f"{'Attack':<16} {'Samples':>8} {'Skipped':>8} {'Match Rate':>12} {'Avg Dist':>10}",
+        "-" * 70,
+    ]
+
+    # Baseline row
+    lines.append(
+        f"{'No Attack':<16} {baseline['total']:>8} {'0':>8} "
+        f"{baseline['match_rate'] * 100:>11.1f}% {baseline['avg_distance']:>10.1f}"
+    )
+
+    # Attack rows
+    for attack_name, df in attack_results.items():
+        total = len(df)
+        skipped = int(df["skipped"].sum()) if "skipped" in df.columns else 0
+        non_skipped = df[~df["skipped"]] if "skipped" in df.columns else df
+        matches = int(non_skipped["success"].sum()) if len(non_skipped) > 0 else 0
+        match_rate = matches / total if total > 0 else 0.0
+        avg_dist = float(non_skipped["distance"].mean()) if len(non_skipped) > 0 else 0.0
+        avg_tokens_affected = float(non_skipped["tokens_affected"].mean()) if len(non_skipped) > 0 else 0.0
+
+        lines.append(
+            f"{attack_name:<16} {total:>8} {skipped:>8} "
+            f"{match_rate * 100:>11.1f}% {avg_dist:>10.1f}"
+        )
+
+    lines.extend([
+        "-" * 70,
+        "",
+        "Token budget details (non-skipped samples):",
+    ])
+
+    for attack_name, df in attack_results.items():
+        non_skipped = df[~df["skipped"]] if "skipped" in df.columns else df
+        if len(non_skipped) > 0:
+            avg_affected = float(non_skipped["tokens_affected"].mean())
+            avg_total = float(non_skipped["total_tokens"].mean())
+            actual_pct = (avg_affected / avg_total * 100) if avg_total > 0 else 0.0
+            lines.append(
+                f"  {attack_name}: avg {avg_affected:.1f} / {avg_total:.1f} tokens affected "
+                f"({actual_pct:.1f}% actual vs {args.attack_budget * 100:.0f}% target)"
+            )
+
     lines.append("")
-    lines.append("Parameters:")
-    lines.append(f"  n (watermark bits): {args.n}")
-    lines.append(f"  u (codeword length): {args.u}")
-    lines.append(f"  distance metric: {args.distance}")
-    lines.append(f"  codebook generation: {args.codebook_generation}")
-    lines.append(f"  attack budgets: {args.budgets}")
-    lines.append(f"  z (negative samples): {args.z}")
-    lines.append(f"  target FPR: {args.fpr_target * 100:.2f}%")
-    lines.append(f"  distance threshold: {threshold}")
-    lines.append(f"  actual FPR: {actual_fpr * 100:.2f}%")
-    lines.append(f"  seed: {args.seed}")
-    lines.append("")
 
-    # Collect model short names and attack names
-    models = list(all_results.keys())
-    short_names = [shorten_model_name(m) for m in models]
-    model_col_width = max(len(s) for s in short_names) + 2
-    budget_col_width = 7  # enough for "100.00"
+    txt_path = os.path.join(output_dir, "results.txt")
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
 
-    # Get attack names from first model
-    attack_names = list(next(iter(all_results.values())).keys())
-    budgets = args.budgets
-
-    for attack_name in attack_names:
-        lines.append(f"Match Rate (%) @ FPR={actual_fpr * 100:.2f}% — {attack_name}")
-        # Header row: model column + budget columns
-        header = " " * model_col_width
-        header += "".join(f"{b:>{budget_col_width}}" for b in budgets)
-        lines.append(header)
-        lines.append("-" * len(header))
-
-        for model, short in zip(models, short_names):
-            results = all_results[model][attack_name]
-            row = f"{short:<{model_col_width}}"
-            row += "".join(f"{results[b] * 100:>{budget_col_width}.2f}" for b in budgets)
-            lines.append(row)
-
-        lines.append("")
-
-    text = "\n".join(lines)
-    print(text)
-    with open(save_path, "w", encoding="utf-8") as f:
-        f.write(text)
+    # Also print to console
+    print("\n".join(lines))
 
 
-def write_model_detail_csv(
-    detail_rows: list[dict],
-    save_path: str,
+def create_bar_chart(
+    baseline: dict,
+    attack_results: dict[str, pd.DataFrame],
+    args: argparse.Namespace,
+    config: dict,
+    output_dir: str,
 ) -> None:
-    """Write per-sample attack detail rows as CSV for offline re-analysis."""
-    pd.DataFrame(detail_rows).to_csv(save_path, index=False)
+    """Create bar chart showing match rate per attack type."""
+    labels = ["No Attack"]
+    match_rates = [baseline["match_rate"] * 100]
 
+    for attack_name, df in attack_results.items():
+        total = len(df)
+        non_skipped = df[~df["skipped"]] if "skipped" in df.columns else df
+        matches = int(non_skipped["success"].sum()) if len(non_skipped) > 0 else 0
+        rate = matches / total * 100 if total > 0 else 0.0
+        labels.append(attack_name.capitalize())
+        match_rates.append(rate)
 
-def write_metadata_csv(
-    model_metadata: list[dict],
-    save_path: str,
-) -> None:
-    """Write per-model metadata CSV with sample counts and FPR info."""
-    pd.DataFrame(model_metadata).to_csv(save_path, index=False)
+    wm = config["watermark"]
+    model_name = _shorten_model_name(config["model"]["name"])
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    colors = ["#2ecc71"] + ["#e74c3c"] * len(attack_results)
+    bars = ax.bar(labels, match_rates, color=colors, edgecolor="black", linewidth=0.5)
+
+    # Add value labels on bars
+    for bar, rate in zip(bars, match_rates):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2, bar.get_height() + 1,
+            f"{rate:.1f}%", ha="center", va="bottom", fontsize=10, fontweight="bold",
+        )
+
+    ax.set_ylabel("Match Rate (%)")
+    ax.set_title(
+        f"Watermark Robustness — {model_name}\n"
+        f"n={wm['n']}, u={wm['u']}, budget={args.attack_budget * 100:.0f}%"
+    )
+    ax.set_ylim(0, min(max(match_rates) + 15, 105))
+    ax.grid(axis="y", alpha=0.3)
+
+    plt.tight_layout()
+
+    png_path = os.path.join(output_dir, "robustness.png")
+    fig.savefig(png_path, dpi=150)
+    print(f"Plot saved: {png_path}")
+
+    if args.show:
+        plt.show()
+    plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-def main() -> None:
+def main():
     args = parse_args()
     paths.ensure_directories()
 
-    # Build codebook (same pattern as matchrate_at_fpr.py)
-    if args.codebook_generation == "rng":
+    # ------------------------------------------------------------------
+    # 1. Load experiment
+    # ------------------------------------------------------------------
+    experiment = load_experiment(args.input_dir)
+    config = experiment["config"]
+    generations_df = experiment["generations"]
+
+    wm = config["watermark"]
+    model_name = config["model"]["name"]
+    n, u = wm["n"], wm["u"]
+    secret_key = wm["secret_key"]
+    green_fraction = wm.get("green_fraction", 0.5)
+    codeword_generation = wm.get("codeword_generation", "rng")
+    bch_m = wm.get("bch_m", None)
+    distance = args.distance or wm.get("distance", "hamming")
+
+    # Device must match the original experiment so torch.randperm produces
+    # identical green/red token splits (CPU vs CUDA RNG differ).
+    experiment_device = config.get("experiment", {}).get("device", "cpu")
+    if experiment_device.startswith("cuda") and not torch.cuda.is_available():
+        print("Warning: experiment used CUDA but no GPU available — decoded bits will differ!")
+        experiment_device = "cpu"
+
+    # Filter to rows with valid generated_text
+    mask = generations_df["generated_text"].notna() & (generations_df["generated_text"].astype(str) != "")
+    working_df = generations_df[mask].reset_index(drop=True)
+
+    if working_df.empty:
+        print("Error: No valid generated_text found in generations.csv")
+        sys.exit(1)
+
+    if args.verbose:
+        print(f"Experiment: {args.input_dir}")
+        print(f"  Model: {model_name}")
+        print(f"  n={n}, u={u}, distance={distance}, codeword_generation={codeword_generation}")
+        print(f"  Samples: {len(working_df)}")
+        print(f"  Attack budget: {args.attack_budget} ({args.attack_budget * 100:.0f}%)")
+        print(f"  Attacks: {', '.join(args.attacks)}")
+
+    # ------------------------------------------------------------------
+    # 2. Create decoder (tokenizer-only)
+    # ------------------------------------------------------------------
+    if args.verbose:
+        print("\nLoading decoder...")
+    decoder = LLMWatermarkDecoder(
+        model_name=model_name,
+        secret_key=secret_key,
+        n=n,
+        u=u,
+        green_list_fraction=green_fraction,
+        device=experiment_device,
+    )
+
+    # ------------------------------------------------------------------
+    # 3. Build codebook
+    # ------------------------------------------------------------------
+    if args.verbose:
+        print("Building codebook...")
+
+    if codeword_generation == "rng":
         generator_cls = RNGCodewordGenerator
         generator_kwargs: dict = {}
-    elif args.codebook_generation == "linear":
+    elif codeword_generation == "linear":
         generator_cls = LinearCodeGenerator
         generator_kwargs = {}
     else:
         generator_cls = BCHCodewordGenerator
-        generator_kwargs = {"m": args.bch_m}
+        generator_kwargs = {"m": bch_m}
 
     base_codebook = CodebookBase(
-        n=args.n,
-        u=args.u,
-        secret_key=args.secret_key,
+        n=n,
+        u=u,
+        secret_key=secret_key,
         generator_cls=generator_cls,
         generator_kwargs=generator_kwargs,
     )
+
     codebooks = None
-    if args.distance == "hamming":
+    if distance == "hamming":
         codebook = CodebookHamming(base_codebook)
-    elif args.distance == "levenshtein-triton":
+    elif distance == "levenshtein-triton":
         num_gpus = resolve_triton_gpu_count(args.num_gpus)
         codebooks = create_triton_codebooks(base_codebook, num_gpus)
         codebook = codebooks[0]
@@ -474,111 +866,86 @@ def main() -> None:
     else:
         codebook = CodebookLevenshtein(base_codebook)
 
-    # Step 1: Compute FPR threshold
-    neg_distances = load_or_generate_negatives(args, codebook, codebooks=codebooks)
-    threshold, actual_fpr = find_threshold(neg_distances, args.fpr_target)
-    print(f"Threshold: {threshold} | Target FPR: {args.fpr_target * 100:.2f}% | Actual FPR: {actual_fpr * 100:.2f}%")
+    # ------------------------------------------------------------------
+    # 4. Compute baseline
+    # ------------------------------------------------------------------
+    if args.verbose:
+        print("\nComputing baseline (no attack)...")
+    baseline = compute_baseline(
+        working_df, decoder, codebook, codebooks, base_codebook, u, verbose=args.verbose)
 
-    # Step 2: Load positive data
-    model_to_df = load_positive_data(args)
-    if not model_to_df:
-        print(f"No matching experiments found (n={args.n}, u={args.u}, distance={args.distance}, codebook={args.codebook_generation})")
-        sys.exit(1)
+    if args.verbose:
+        print(f"  Baseline match rate: {baseline['match_rate'] * 100:.1f}%")
+        print(f"  Baseline avg distance: {baseline['avg_distance']:.1f}")
 
-    # Step 3: Create output directory
+    # ------------------------------------------------------------------
+    # 5. Prepare attack resources
+    # ------------------------------------------------------------------
+    nltk_needed = []
+    if "synonym" in args.attacks:
+        nltk_needed.extend(["taggers/averaged_perceptron_tagger_eng", "corpora/wordnet"])
+    if "insertion" in args.attacks:
+        nltk_needed.append("corpora/words")
+
+    if nltk_needed:
+        if args.verbose:
+            print("\nDownloading NLTK data...")
+        _ensure_nltk_data(nltk_needed)
+
+    # Build word pool for insertion
+    word_pool = None
+    if "insertion" in args.attacks:
+        from nltk.corpus import words
+        word_pool = words.words()
+        if args.verbose:
+            print(f"  Word pool: {len(word_pool)} words from NLTK corpus")
+
+    # Create OpenAI client for paraphrase
+    client = None
+    if "paraphrase" in args.attacks:
+        from openai import OpenAI
+        client = OpenAI(base_url=args.api_base_url, api_key=args.api_key)
+
+    # ------------------------------------------------------------------
+    # 6. Run attacks
+    # ------------------------------------------------------------------
+    if args.verbose:
+        print("\nRunning attacks...")
+
+    attack_results = evaluate_attacks(
+        generations_df=working_df,
+        decoder=decoder,
+        codebook=codebook,
+        codebooks=codebooks,
+        base_codebook=base_codebook,
+        u=u,
+        attack_budget=args.attack_budget,
+        attacks=args.attacks,
+        seed=args.seed,
+        word_pool=word_pool,
+        client=client,
+        paraphrase_model=args.paraphrase_model or "",
+        paraphrase_timeout=args.paraphrase_timeout,
+        verbose=args.verbose,
+    )
+
+    # ------------------------------------------------------------------
+    # 7. Create output directory and write results
+    # ------------------------------------------------------------------
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    # Use raw CLI values for folder name (e.g., "budget-0.1" or "budget-1-4-9-13")
-    budget_str = "-".join(
-        str(int(b)) if b == int(b) else str(b) for b in args.attack_budget
-    )
-    run_dir_name = (
-        f"attack_robustness_n{args.n}_u{args.u}"
-        f"_dist-{args.distance}_c-{args.codebook_generation}"
-        f"_budget-{budget_str}_{timestamp}"
-    )
+    budget_str = str(args.attack_budget).replace(".", "p")
+    run_dir_name = f"word_attack_n{n}_u{u}_budget-{budget_str}_{timestamp}"
     run_save_dir = os.path.join(args.save_dir, run_dir_name)
     os.makedirs(run_save_dir, exist_ok=True)
 
-    # Step 4: Run attacks per model
-    all_results: dict[str, dict[str, dict[int, float]]] = {}
-    model_metadata: list[dict] = []
+    if args.verbose:
+        print(f"\nSaving results to: {run_save_dir}")
 
-    for model, df in sorted(model_to_df.items()):
-        print(f"\nProcessing {shorten_model_name(model)}...")
+    write_detail_csvs(attack_results, run_save_dir)
+    write_results_txt(args, config, baseline, attack_results, run_save_dir)
+    create_bar_chart(baseline, attack_results, args, config, run_save_dir)
 
-        total_samples = len(df)
-        successful = df[df["successful_watermark"] == True]
-
-        model_metadata.append({
-            "model": model,
-            "total_samples": total_samples,
-            "successful_samples": len(successful),
-            "fpr_threshold": threshold,
-            "fpr_percentage": actual_fpr * 100,
-        })
-
-        # Parse decoded codewords and original watermark identities from successful samples
-        decoded_codewords = [
-            np.array([int(b) for b in str(cw)], dtype=np.uint8)
-            for cw in successful["decoded_codeword"].values
-        ]
-        original_watermarks = successful["watermark"].values.astype(np.int64)
-
-        # Pre-compute original codebook codewords as bitstrings
-        original_codewords = [
-            _bits_to_str(codebook.base.get_codeword_by_index(int(wm)))
-            for wm in original_watermarks
-        ]
-
-        print(f"  Loaded {len(decoded_codewords)} successful / {total_samples} total samples")
-
-        attack_results: dict[str, dict[int, float]] = {}
-        model_detail_rows: list[dict] = []
-        for attack_name, attack_fn in [
-            ("Substitution", apply_substitution_attack),
-            ("Insertion", apply_insertion_attack),
-            ("Deletion", apply_deletion_attack),
-        ]:
-            tpr_dict, detail_rows = evaluate_attack_robustness(
-                decoded_codewords=decoded_codewords,
-                original_watermarks=original_watermarks,
-                original_codewords=original_codewords,
-                total_samples=total_samples,
-                codebook=codebook,
-                attack_fn=attack_fn,
-                budgets=args.budgets,
-                threshold=threshold,
-                u=args.u,
-                seed=args.seed,
-                attack_name=attack_name,
-                codebooks=codebooks,
-            )
-            attack_results[attack_name] = tpr_dict
-            for row in detail_rows:
-                row["attack"] = attack_name
-            model_detail_rows.extend(detail_rows)
-
-        all_results[model] = attack_results
-
-        # Per-model detail CSV
-        safe_model = sanitize_filename(model)
-        csv_path = os.path.join(run_save_dir, f"{safe_model}_details.csv")
-        write_model_detail_csv(model_detail_rows, csv_path)
-        print(f"  Saved detail CSV: {csv_path}")
-
-        # Per-model plot
-        plot_path = os.path.join(run_save_dir, f"{safe_model}_robustness.png")
-        create_model_plot(model, attack_results, actual_fpr, args, plot_path)
-        print(f"  Saved plot: {plot_path}")
-
-    # Step 5: Write results
-    results_path = os.path.join(run_save_dir, "results.txt")
-    write_results_txt(args, threshold, actual_fpr, all_results, results_path)
-
-    metadata_path = os.path.join(run_save_dir, "metadata.csv")
-    write_metadata_csv(model_metadata, metadata_path)
-
-    print(f"\nOutputs saved to: {run_save_dir}")
+    print(f"\nDone. Results saved to: {run_save_dir}")
 
 
 if __name__ == "__main__":

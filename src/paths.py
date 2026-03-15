@@ -10,15 +10,17 @@ MODELS_CACHE_DIR = os.path.join(CACHE_DIR, "models")
 DATASETS_CACHE_DIR = os.path.join(CACHE_DIR, "datasets")
 CODEBOOKS_CACHE_DIR = os.path.join(CACHE_DIR, "codebooks")
 SCRIPTS_CACHE_DIR = os.path.join(CACHE_DIR, "scripts")
+NLTK_CACHE_DIR = os.path.join(CACHE_DIR, "nltk")
 OUTPUT_DIR = "./output"
 
 def set_cache_dir(base_dir):
-    global CACHE_DIR, MODELS_CACHE_DIR, DATASETS_CACHE_DIR, CODEBOOKS_CACHE_DIR, SCRIPTS_CACHE_DIR
+    global CACHE_DIR, MODELS_CACHE_DIR, DATASETS_CACHE_DIR, CODEBOOKS_CACHE_DIR, SCRIPTS_CACHE_DIR, NLTK_CACHE_DIR
     CACHE_DIR = base_dir
     MODELS_CACHE_DIR = os.path.join(CACHE_DIR, "models")
     DATASETS_CACHE_DIR = os.path.join(CACHE_DIR, "datasets")
     CODEBOOKS_CACHE_DIR = os.path.join(CACHE_DIR, "codebooks")
     SCRIPTS_CACHE_DIR = os.path.join(CACHE_DIR, "scripts")
+    NLTK_CACHE_DIR = os.path.join(CACHE_DIR, "nltk")
 
 def ensure_directories():
     os.makedirs(CACHE_DIR, exist_ok=True)
@@ -26,4 +28,5 @@ def ensure_directories():
     os.makedirs(DATASETS_CACHE_DIR, exist_ok=True)
     os.makedirs(CODEBOOKS_CACHE_DIR, exist_ok=True)
     os.makedirs(SCRIPTS_CACHE_DIR, exist_ok=True)
+    os.makedirs(NLTK_CACHE_DIR, exist_ok=True)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
