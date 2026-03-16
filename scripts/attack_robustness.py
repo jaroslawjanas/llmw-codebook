@@ -20,6 +20,7 @@ import argparse
 import os
 import sys
 import time as time_mod
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -86,6 +87,8 @@ def parse_args() -> argparse.Namespace:
         help="Model name for paraphrasing (e.g., openai/gpt-4o-mini)")
     parser.add_argument("--paraphrase-timeout", type=float, default=30.0,
         help="Timeout in seconds for paraphrase API calls (default: 30)")
+    parser.add_argument("--paraphrase-workers", type=int, default=0,
+        help="Number of parallel API workers for paraphrasing (0 = auto/cpu_count, default: 0)")
 
     # Search configuration
     parser.add_argument(
@@ -337,30 +340,26 @@ def _call_paraphrase_api(client, model_name: str, text: str, timeout: float, max
                 raise RuntimeError(f"Paraphrase API failed after {max_retries} retries: {e}")
 
 
-def apply_paraphrase(
+def _select_paraphrase_region(
     text: str,
     attack_budget: float,
     tokenizer,
     rng: np.random.Generator,
-    client,
-    model_name: str,
-    timeout: float,
-) -> tuple[str, int]:
+) -> tuple[list[str], int, int, int] | None:
     """
-    Select a contiguous region of words, expand until token budget is met,
-    then paraphrase via API.
+    Select a contiguous region of words to paraphrase.
 
     Returns:
-        (attacked_text, tokens_affected)
+        (words, left, right, region_tokens) or None if text is too short.
     """
     words = text.split()
     if len(words) <= 2:
-        return text, 0
+        return None
 
     total_tokens = len(tokenizer.encode(text, add_special_tokens=False))
     target_tokens = int(attack_budget * total_tokens)
     if target_tokens <= 0:
-        return text, 0
+        return None
 
     # Start from a random center, expand alternating left/right
     center = int(rng.integers(len(words)))
@@ -395,11 +394,13 @@ def apply_paraphrase(
         region_tokens = len(tokenizer.encode(region_text, add_special_tokens=False))
         expand_left = not expand_left
 
-    # Call API to paraphrase the selected region
-    selected_text = " ".join(words[left : right + 1])
-    paraphrased = _call_paraphrase_api(client, model_name, selected_text, timeout)
+    return words, left, right, region_tokens
 
-    # Reconstruct: prefix + paraphrased + suffix
+
+def _reconstruct_paraphrased(
+    words: list[str], left: int, right: int, paraphrased: str,
+) -> str:
+    """Reconstruct text: prefix + paraphrased region + suffix."""
     prefix_words = words[:left]
     suffix_words = words[right + 1 :]
     parts = []
@@ -408,9 +409,35 @@ def apply_paraphrase(
     parts.append(paraphrased)
     if suffix_words:
         parts.append(" ".join(suffix_words))
-    attacked_text = " ".join(parts)
+    return " ".join(parts).strip()
 
-    return attacked_text.strip(), region_tokens
+
+def apply_paraphrase(
+    text: str,
+    attack_budget: float,
+    tokenizer,
+    rng: np.random.Generator,
+    client,
+    model_name: str,
+    timeout: float,
+) -> tuple[str, int]:
+    """
+    Select a contiguous region of words, expand until token budget is met,
+    then paraphrase via API.
+
+    Returns:
+        (attacked_text, tokens_affected)
+    """
+    result = _select_paraphrase_region(text, attack_budget, tokenizer, rng)
+    if result is None:
+        return text, 0
+
+    words, left, right, region_tokens = result
+    selected_text = " ".join(words[left : right + 1])
+    paraphrased = _call_paraphrase_api(client, model_name, selected_text, timeout)
+    attacked_text = _reconstruct_paraphrased(words, left, right, paraphrased)
+
+    return attacked_text, region_tokens
 
 
 # ---------------------------------------------------------------------------
@@ -506,6 +533,132 @@ def compute_baseline(
     }
 
 
+def _run_paraphrase_attack(
+    generations_df: pd.DataFrame,
+    decoder: LLMWatermarkDecoder,
+    codebook,
+    codebooks: list | None,
+    base_codebook: CodebookBase,
+    u: int,
+    attack_budget: float,
+    seed: int,
+    attack_idx: int,
+    client,
+    paraphrase_model: str,
+    paraphrase_timeout: float,
+    paraphrase_workers: int,
+    verbose: bool,
+) -> pd.DataFrame:
+    """Run paraphrase attack with parallel API calls."""
+    rng = np.random.default_rng(seed + attack_idx)
+
+    # Phase 1: Pre-select regions sequentially (preserves RNG determinism)
+    tasks = []  # (row_idx, original_text, original_watermark, total_tokens, region_info)
+    for row_idx, (_, row) in enumerate(generations_df.iterrows()):
+        original_text = str(row["generated_text"])
+        original_watermark = int(row["watermark"])
+        total_tokens = len(decoder.tokenizer.encode(original_text, add_special_tokens=False))
+
+        words = original_text.split()
+        if len(words) < 3:
+            tasks.append((row_idx, original_text, original_watermark, total_tokens, None))
+            continue
+
+        region = _select_paraphrase_region(original_text, attack_budget, decoder.tokenizer, rng)
+        tasks.append((row_idx, original_text, original_watermark, total_tokens, region))
+
+    # Phase 2: Parallel API calls
+    # Build work items for samples that have a valid region
+    api_work = []  # (task_index, selected_text, words, left, right, region_tokens)
+    for i, (row_idx, original_text, original_watermark, total_tokens, region) in enumerate(tasks):
+        if region is not None:
+            words, left, right, region_tokens = region
+            selected_text = " ".join(words[left : right + 1])
+            api_work.append((i, selected_text, words, left, right, region_tokens))
+
+    paraphrased_results = {}  # task_index -> (attacked_text, region_tokens) or error str
+
+    def _api_call(work_item):
+        idx, selected_text, words, left, right, region_tokens = work_item
+        paraphrased = _call_paraphrase_api(client, paraphrase_model, selected_text, paraphrase_timeout)
+        attacked_text = _reconstruct_paraphrased(words, left, right, paraphrased)
+        return idx, attacked_text, region_tokens
+
+    if paraphrase_workers <= 0:
+        paraphrase_workers = os.cpu_count() or 4
+
+    with ThreadPoolExecutor(max_workers=paraphrase_workers) as pool:
+        futures = {pool.submit(_api_call, w): w[0] for w in api_work}
+        with tqdm(total=len(futures), desc="  paraphrase", disable=not verbose) as pbar:
+            for future in as_completed(futures):
+                task_idx = futures[future]
+                try:
+                    idx, attacked_text, region_tokens = future.result()
+                    paraphrased_results[idx] = (attacked_text, region_tokens)
+                except Exception as e:
+                    paraphrased_results[task_idx] = str(e)
+                pbar.update(1)
+
+    # Phase 3: Assemble records and decode
+    records = []
+    queries = []
+    query_indices = []
+
+    for i, (row_idx, original_text, original_watermark, total_tokens, region) in enumerate(tasks):
+        record = {
+            "sample_index": row_idx,
+            "attack_type": "paraphrase",
+            "original_watermark": original_watermark,
+            "total_tokens": total_tokens,
+        }
+
+        if region is None:
+            record.update({
+                "recovered_watermark": -1, "distance": -1, "success": False,
+                "tokens_affected": 0, "original_text": original_text,
+                "attacked_text": original_text, "skipped": True,
+                "skip_reason": "text too short",
+            })
+            records.append(record)
+            continue
+
+        result = paraphrased_results.get(i)
+        if isinstance(result, str):
+            # API error
+            record.update({
+                "recovered_watermark": -1, "distance": -1, "success": False,
+                "tokens_affected": 0, "original_text": original_text,
+                "attacked_text": "", "skipped": True,
+                "skip_reason": result,
+            })
+            records.append(record)
+            continue
+
+        attacked_text, tokens_affected = result
+        record.update({
+            "tokens_affected": tokens_affected,
+            "original_text": original_text,
+            "attacked_text": attacked_text,
+            "skipped": False,
+            "skip_reason": "",
+        })
+
+        bit_seq, _, _ = decoder.decode(attacked_text)
+        queries.append(np.array(bit_seq, dtype=np.uint8))
+        query_indices.append(len(records))
+        records.append(record)
+
+    if queries:
+        retrieved_wm, distances = _batch_search(queries, codebook, codebooks, base_codebook, u)
+        for j, rec_idx in enumerate(query_indices):
+            rec = records[rec_idx]
+            rec["recovered_watermark"] = int(retrieved_wm[j])
+            rec["distance"] = int(distances[j])
+            rec["success"] = int(retrieved_wm[j]) == rec["original_watermark"]
+
+    return pd.DataFrame(records)
+
+
 def evaluate_attacks(
     generations_df: pd.DataFrame,
     decoder: LLMWatermarkDecoder,
@@ -520,6 +673,7 @@ def evaluate_attacks(
     client=None,
     paraphrase_model: str = "",
     paraphrase_timeout: float = 30.0,
+    paraphrase_workers: int = 0,
     verbose: bool = False,
 ) -> dict[str, pd.DataFrame]:
     """
@@ -531,6 +685,15 @@ def evaluate_attacks(
     results: dict[str, pd.DataFrame] = {}
 
     for attack_idx, attack_name in enumerate(attacks):
+        # Paraphrase has its own parallel path
+        if attack_name == "paraphrase":
+            results[attack_name] = _run_paraphrase_attack(
+                generations_df, decoder, codebook, codebooks, base_codebook,
+                u, attack_budget, seed, attack_idx, client, paraphrase_model,
+                paraphrase_timeout, paraphrase_workers, verbose,
+            )
+            continue
+
         rng = np.random.default_rng(seed + attack_idx)
 
         records = []
@@ -575,10 +738,6 @@ def evaluate_attacks(
                 elif attack_name == "synonym":
                     attacked_text, tokens_affected = apply_synonym_replace(
                         original_text, attack_budget, decoder.tokenizer, rng)
-                elif attack_name == "paraphrase":
-                    attacked_text, tokens_affected = apply_paraphrase(
-                        original_text, attack_budget, decoder.tokenizer, rng,
-                        client, paraphrase_model, paraphrase_timeout)
                 else:
                     raise ValueError(f"Unknown attack: {attack_name}")
             except Exception as e:
@@ -926,6 +1085,7 @@ def main():
         client=client,
         paraphrase_model=args.paraphrase_model or "",
         paraphrase_timeout=args.paraphrase_timeout,
+        paraphrase_workers=args.paraphrase_workers,
         verbose=args.verbose,
     )
 
