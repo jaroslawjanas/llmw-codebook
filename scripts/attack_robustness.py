@@ -821,6 +821,7 @@ def write_results_txt(
         f"Parameters:  n={wm['n']}, u={wm['u']}, distance={distance}",
         f"Budget:      {args.attack_budget} ({args.attack_budget * 100:.0f}% of tokens)",
         f"Seed:        {args.seed}",
+        *([f"Paraphrase:  {args.paraphrase_model}"] if args.paraphrase_model else []),
         "",
         "-" * 70,
         f"{'Attack':<16} {'Samples':>8} {'Skipped':>8} {'Match Rate':>12} {'Avg Dist':>10}",
