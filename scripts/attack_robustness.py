@@ -107,6 +107,8 @@ def parse_args() -> argparse.Namespace:
         help="Directory to save analysis outputs (default: output)")
     parser.add_argument("--verbose", action="store_true", help="Show detailed progress")
     parser.add_argument("--show", action="store_true", help="Display plots interactively")
+    parser.add_argument("--no-truncate", action="store_true",
+        help="Don't truncate decoded bits at u (default: truncate to u)")
 
     args = parser.parse_args()
 
@@ -548,6 +550,7 @@ def _run_paraphrase_attack(
     paraphrase_timeout: float,
     paraphrase_workers: int,
     verbose: bool,
+    truncate: bool = True,
 ) -> pd.DataFrame:
     """Run paraphrase attack with parallel API calls."""
     rng = np.random.default_rng(seed + attack_idx)
@@ -643,7 +646,7 @@ def _run_paraphrase_attack(
             "skip_reason": "",
         })
 
-        bit_seq, _, _ = decoder.decode(attacked_text, truncate=False)
+        bit_seq, _, _ = decoder.decode(attacked_text, truncate=truncate)
         queries.append(np.array(bit_seq, dtype=np.uint8))
         query_indices.append(len(records))
         records.append(record)
@@ -675,6 +678,7 @@ def evaluate_attacks(
     paraphrase_timeout: float = 30.0,
     paraphrase_workers: int = 0,
     verbose: bool = False,
+    truncate: bool = True,
 ) -> dict[str, pd.DataFrame]:
     """
     Run requested attacks on all samples.
@@ -690,7 +694,7 @@ def evaluate_attacks(
             results[attack_name] = _run_paraphrase_attack(
                 generations_df, decoder, codebook, codebooks, base_codebook,
                 u, attack_budget, seed, attack_idx, client, paraphrase_model,
-                paraphrase_timeout, paraphrase_workers, verbose,
+                paraphrase_timeout, paraphrase_workers, verbose, truncate,
             )
             continue
 
@@ -758,8 +762,8 @@ def evaluate_attacks(
                 "skip_reason": "",
             })
 
-            # Decode attacked text (no truncation — let search handle length differences)
-            bit_seq, _, _ = decoder.decode(attacked_text, truncate=False)
+            # Decode attacked text
+            bit_seq, _, _ = decoder.decode(attacked_text, truncate=truncate)
             queries.append(np.array(bit_seq, dtype=np.uint8))
             query_indices.append(len(records))
             records.append(record)
@@ -1088,6 +1092,7 @@ def main():
         paraphrase_timeout=args.paraphrase_timeout,
         paraphrase_workers=args.paraphrase_workers,
         verbose=args.verbose,
+        truncate=not args.no_truncate,
     )
 
     # ------------------------------------------------------------------
