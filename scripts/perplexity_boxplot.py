@@ -30,7 +30,7 @@ import pandas as pd
 CONDITION_ORDER = ["human", "no_watermark", "watermarked"]
 CONDITION_LABELS = {
     "human": "Human",
-    "no_watermark": "No Watermark",
+    "no_watermark": "Not Watermarked",
     "watermarked": "Watermarked",
 }
 
@@ -101,25 +101,24 @@ def main():
         patch.set_facecolor(color)
         patch.set_alpha(0.7)
 
-    # Add median annotations
+    # Add median annotations to the right of each box
     for i, v in enumerate(values):
         median = np.median(v)
         ax.annotate(
             f"{median:.1f}",
-            xy=(i + 1, median),
-            xytext=(10, 0),
-            textcoords="offset points",
+            xy=(i + 1.3, median),
             fontsize=9,
+            ha="left",
             va="center",
         )
 
     ax.set_ylabel("Perplexity", fontsize=12)
-    ax.set_title("Perplexity Distribution by Text Condition", fontsize=13)
 
     if args.max_ppl is not None:
         ax.set_ylim(top=args.max_ppl)
 
-    ax.grid(axis="y", alpha=0.3)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
     fig.tight_layout()
 
     output_path = args.output if args.output else str(input_dir / "boxplot.png")
