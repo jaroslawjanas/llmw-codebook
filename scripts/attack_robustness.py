@@ -643,7 +643,7 @@ def _run_paraphrase_attack(
             "skip_reason": "",
         })
 
-        bit_seq, _, _ = decoder.decode(attacked_text)
+        bit_seq, _, _ = decoder.decode(attacked_text, truncate=False)
         queries.append(np.array(bit_seq, dtype=np.uint8))
         query_indices.append(len(records))
         records.append(record)
@@ -758,8 +758,8 @@ def evaluate_attacks(
                 "skip_reason": "",
             })
 
-            # Decode attacked text
-            bit_seq, _, _ = decoder.decode(attacked_text)
+            # Decode attacked text (no truncation — let search handle length differences)
+            bit_seq, _, _ = decoder.decode(attacked_text, truncate=False)
             queries.append(np.array(bit_seq, dtype=np.uint8))
             query_indices.append(len(records))
             records.append(record)

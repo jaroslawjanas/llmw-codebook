@@ -565,12 +565,19 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         super().__init__(model_name, secret_key, n, u, green_list_fraction, seed, cache_dir, device, verbose)
 
         
-    def decode(self, generated: Union[str, List[int]]) -> Tuple[List[int], int, List[int]]:
+    def decode(
+        self,
+        generated: Union[str, List[int]],
+        truncate: bool = True,
+    ) -> Tuple[List[int], int, List[int]]:
         """
         Decode watermark information from generated text or pre-tokenized IDs.
 
         Args:
             generated: Union[str, List[int]] - Either the generated text (prompt removed) or a list of token IDs
+            truncate: If True (default), cap decoded tokens at self.u.
+                      If False, decode all tokens (useful for attacked text
+                      where token count may differ from u).
 
         Returns:
             Tuple of (bit_code, decoded_tokens_length, token_ids):
@@ -589,9 +596,11 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         else:
             raise TypeError(f"generated must be str or List[int], got {type(generated).__name__}")
 
+        tokens_to_decode = token_ids[:self.u] if truncate else token_ids
+
         # Extract bits by classifying each token as green (1) or red (0)
         bit_code = []
-        for i, token_id in enumerate(token_ids[:self.u]):
+        for i, token_id in enumerate(tokens_to_decode):
             if i == 0:
                 vocab_split_token = 0
             else:
