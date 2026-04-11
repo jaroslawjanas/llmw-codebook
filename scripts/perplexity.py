@@ -280,10 +280,19 @@ def compute_perplexity(
         with torch.no_grad():
             outputs = model(window_ids, labels=target_ids)
 
-        # Count tokens that contributed to loss.
-        # HF shifts labels left by 1 internally, so subtract 1 from valid count.
-        num_valid = (target_ids != -100).sum().item()
-        num_loss_tokens = num_valid - 1  # -1 for internal left-shift
+        # Count tokens that actually contributed to the loss.
+        # HF computes loss on shift_labels = labels[:, 1:], so count the
+        # non-ignored positions in that shifted view.
+        #
+        # For the first (unmasked) window this equals window_size-1: the last
+        # logit position predicts a token outside the window and is dropped by
+        # the shift, so one token is lost.
+        #
+        # For subsequent windows where the overlap region is masked at the
+        # START of target_ids, the shift drops that leading -100 and all
+        # trg_len valid tokens remain — the correct count is trg_len, NOT
+        # trg_len-1.  Counting from the shifted view handles both cases.
+        num_loss_tokens = (target_ids[0, 1:] != -100).sum().item()
 
         if num_loss_tokens > 0:
             nll_sum += outputs.loss.item() * num_loss_tokens

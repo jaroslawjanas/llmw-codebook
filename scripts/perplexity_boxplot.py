@@ -66,8 +66,8 @@ def main():
         csv_path = input_dir / f"{condition}.csv"
         if csv_path.exists():
             df = pd.read_csv(csv_path)
-            # Filter out skipped texts
-            df = df[df["skipped"] == False]
+            # Filter out skipped texts and any failed rows (perplexity=nan/inf)
+            df = df[(df["skipped"] == False) & np.isfinite(df["perplexity"])]
             data[condition] = df["perplexity"].values
 
     if not data:
@@ -122,7 +122,7 @@ def main():
     fig.tight_layout()
 
     output_path = args.output if args.output else str(input_dir / "boxplot.png")
-    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
     print(f"Saved to {output_path}")
 
 

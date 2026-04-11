@@ -925,7 +925,7 @@ def create_bar_chart(
     plt.tight_layout()
 
     png_path = os.path.join(output_dir, "robustness.png")
-    fig.savefig(png_path, dpi=150)
+    fig.savefig(png_path, dpi=300)
     print(f"Plot saved: {png_path}")
 
     if args.show:
