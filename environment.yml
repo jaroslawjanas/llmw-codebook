@@ -12,7 +12,6 @@ dependencies:
   - pytorch::pytorch=2.5.1 #2.4.1 might be needed for some older GPUs
   - pytorch::pytorch-cuda=12.4
 # -------------
-  - transformers=4.51.3
   - datasets=3.6.0
   - tqdm=4.67.1
   - numpy>=2
@@ -27,8 +26,9 @@ dependencies:
   - c-compiler  # Needed by Triton to build CUDA utilities
   - pip
   - pip:
-    - accelerate==1.7.0
-    - huggingface_hub==0.33.0
+    - transformers>=5.5.0   # Gemma 4 requires 5.5+; moved from conda (conda-forge lags PyPI for HF packages)
+    - accelerate>=1.1.0
+    - huggingface_hub>=0.28.0
     - protobuf==6.32.0
     - faiss-cpu>=1.12.0
     - galois==0.4.6
