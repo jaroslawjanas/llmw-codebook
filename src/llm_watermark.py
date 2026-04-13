@@ -205,7 +205,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         if self.device.startswith("cuda"):
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.model_name,
-                torch_dtype=torch.float16,  # Use float16 for memory efficiency
+                torch_dtype="auto",  # Use model's native dtype (bfloat16 for Gemma/Llama3/Mistral, float16 for older models)
                 device_map=self.device,  # "cuda", "cuda:0", "cuda:1", etc.
                 **model_kwargs
             )

@@ -54,7 +54,7 @@ def gpu_worker(config: dict, batch_items: list[tuple[int, str]], results_queue: 
     tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=model_cache)
     model = AutoModelForCausalLM.from_pretrained(
         model_name, cache_dir=model_cache,
-        torch_dtype=torch.float16 if device != "cpu" else torch.float32,
+        torch_dtype="auto" if device != "cpu" else torch.float32,
     ).to(device)
     model.eval()
 
