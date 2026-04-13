@@ -74,12 +74,15 @@ def format_with_processor(prompt: str, model_name: str, verbose: bool = False) -
         
         # Create processor and apply chat template
         processor = AutoProcessor.from_pretrained(model_name, token=token)
-        formatted_prompt = processor.apply_chat_template(
-            messages, 
-            add_generation_prompt=True, 
-            tokenize=False,
-            enable_thinking=False
-        )
+        template_kwargs = {"add_generation_prompt": True, "tokenize": False}
+        try:
+            # Try with enable_thinking for models that support it (e.g. Qwen3)
+            formatted_prompt = processor.apply_chat_template(
+                messages, **template_kwargs, enable_thinking=False
+            )
+        except TypeError:
+            # Model doesn't accept enable_thinking kwarg (Gemma 4, Llama, Mistral, etc.)
+            formatted_prompt = processor.apply_chat_template(messages, **template_kwargs)
         
         if verbose:
             print(f"[DEBUG] Successfully formatted with processor")
