@@ -294,10 +294,16 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         # Handle modern DynamicCache objects (transformers 4.36+)
         # These have key_cache and value_cache attributes as lists of tensors
         if hasattr(past_key_values, 'key_cache') and hasattr(past_key_values, 'value_cache'):
-            # Trim in place by slicing each layer's tensors
+            # Trim in place by slicing each layer's tensors.
+            # Guard on shape[2]: HybridCache (Gemma 4) pre-allocates fixed-size circular buffers
+            # for sliding-window attention layers, so only trim layers where the cache has actually
+            # grown beyond trim_amount (i.e. dynamic/global attention layers).
             for i in range(len(past_key_values.key_cache)):
-                past_key_values.key_cache[i] = past_key_values.key_cache[i][:, :, trim_amount:, :]
-                past_key_values.value_cache[i] = past_key_values.value_cache[i][:, :, trim_amount:, :]
+                k = past_key_values.key_cache[i]
+                v = past_key_values.value_cache[i]
+                if k.shape[2] > trim_amount:
+                    past_key_values.key_cache[i] = k[:, :, trim_amount:, :]
+                    past_key_values.value_cache[i] = v[:, :, trim_amount:, :]
             return past_key_values
 
         # Handle legacy tuple format (older transformers versions)
