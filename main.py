@@ -88,6 +88,7 @@ def main():
     parser.add_argument("--no-cuda", action="store_true", help="Disable CUDA even if available")
     parser.add_argument("--context-window", type=int, default=1500, help="Maximum number of tokens to use as context for generation (default: 1500)")
     parser.add_argument("--temperature", "--temp", type=float, default=0.0, help="Sampling temperature (default: 0.0 = greedy sampling, higher = more random)")
+    parser.add_argument("--top-p", type=float, default=1.0, help="Nucleus sampling probability threshold (default: 1.0 = disabled)")
     parser.add_argument("--hash-window", type=int, default=1, help="Number of previous tokens to hash together (default: 1)") 
     parser.add_argument("--n-prompts", type=str, default="1", help="Number of prompts to process, or 'all' for entire dataset (default: 1)")
     parser.add_argument("--verbose", action="store_true", help="Show detailed output and progress information")
@@ -249,6 +250,7 @@ def main():
         },
         "generation": {
             "temperature": args.temperature,
+            "top_p": args.top_p,
             "n_prompts": total_prompts,
             "seed": args.seed,
         },
@@ -288,6 +290,7 @@ def main():
         'device': device,
         'context_window': args.context_window,
         'temperature': args.temperature,
+        'top_p': args.top_p,
         'hash_window': args.hash_window,
         'verbose': args.verbose and args.synch,
         'ti_correction': not args.skip_ti_correction

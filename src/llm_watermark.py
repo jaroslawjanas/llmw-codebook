@@ -150,6 +150,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         device: Optional[str] = "cpu",
         context_window: int = 1500,
         temperature: float = 0.0,
+        top_p: float = 1.0,
         hash_window: int = 1,
         ti_correction: bool = True,
         verbose: bool = False
@@ -179,6 +180,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         self.bias = bias
         self.context_window = context_window
         self.temperature = temperature
+        self.top_p = top_p
         self.hash_window = hash_window
         self.ti_correction = ti_correction
         
@@ -250,6 +252,17 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
 
             if self.temperature == 0 or self.temperature < 1e-6:
                 token_id = int(torch.argmax(probs, dim=-1).item())
+            elif self.top_p < 1.0:
+                probs_flat = probs.squeeze().clone()
+                sorted_probs, sorted_indices = torch.sort(probs_flat, descending=True)
+                cumulative_probs = torch.cumsum(sorted_probs, dim=0)
+                # Shift right so the token that first pushes cumsum over top_p is kept
+                sorted_indices_to_remove = cumulative_probs > self.top_p
+                sorted_indices_to_remove[1:] = sorted_indices_to_remove[:-1].clone()
+                sorted_indices_to_remove[0] = False  # always keep the top-1 token
+                probs_flat[sorted_indices[sorted_indices_to_remove]] = 0.0
+                probs_flat = probs_flat / probs_flat.sum()
+                token_id = int(torch.multinomial(probs_flat, 1).item())
             else:
                 token_id = int(torch.multinomial(probs.squeeze(), 1).item())
 
