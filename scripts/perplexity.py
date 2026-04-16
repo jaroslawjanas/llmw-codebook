@@ -44,6 +44,7 @@ from tqdm import tqdm
 
 import src.paths as paths
 from src.utils import load_hf_token
+from scripts.utils import load_texts, parse_text_source, source_description
 
 
 # ---------------------------------------------------------------------------
@@ -118,101 +119,6 @@ def parse_args() -> argparse.Namespace:
         parser.error("At least one of --human-text, --no-watermark-text, --watermarked-text is required")
 
     return args
-
-
-# ---------------------------------------------------------------------------
-# Text source parsing & loading
-# ---------------------------------------------------------------------------
-
-def _parse_text_source(args_list: list[str]) -> dict:
-    """Parse a text source argument list into a structured descriptor.
-
-    Returns dict with either:
-      {"type": "directory", "path": str}
-      {"type": "dataset", "name": str, "subset": str, "split": str,
-       "column": str, "index": int | None}
-    """
-    if len(args_list) == 1 and os.path.isdir(args_list[0]):
-        return {"type": "directory", "path": args_list[0]}
-
-    if len(args_list) == 4:
-        name, subset, split, column = args_list
-        col_index = None
-        if "[" in column and column.endswith("]"):
-            bracket_pos = column.index("[")
-            col_index = int(column[bracket_pos + 1 : -1])
-            column = column[:bracket_pos]
-        return {
-            "type": "dataset",
-            "name": name,
-            "subset": subset,
-            "split": split,
-            "column": column,
-            "index": col_index,
-        }
-
-    if len(args_list) == 1:
-        raise ValueError(
-            f"'{args_list[0]}' is not an existing directory, and a HuggingFace "
-            f"dataset requires exactly 4 arguments: name subset split column"
-        )
-    raise ValueError(
-        f"Expected 1 arg (directory) or 4 args (dataset name subset split column), "
-        f"got {len(args_list)}: {args_list}"
-    )
-
-
-def _source_description(source: dict) -> str:
-    """Human-readable description of a text source."""
-    if source["type"] == "directory":
-        return f"dir: {source['path']}"
-    col_desc = source["column"]
-    if source.get("index") is not None:
-        col_desc += f"[{source['index']}]"
-    return f"dataset: {source['name']}/{source['subset']} ({source['split']} split, {col_desc} column)"
-
-
-def load_texts(source: dict, seed: int, n_texts: int | None = None) -> list[str]:
-    """Load texts from either an experiment directory or HuggingFace dataset."""
-    from scripts.utils import load_experiment
-    from src.utils import get_shuffled_essays
-
-    if source["type"] == "directory":
-        experiment = load_experiment(source["path"])
-        df = experiment["generations"]
-        mask = df["generated_text"].notna() & (df["generated_text"].astype(str) != "")
-        texts = df.loc[mask, "generated_text"].astype(str).tolist()
-        if n_texts is not None:
-            texts = texts[:n_texts]
-        return texts
-
-    # HuggingFace dataset
-    raw_items = get_shuffled_essays(
-        dataset_name=source["name"],
-        dataset_subset=source["subset"],
-        dataset_split=source["split"],
-        dataset_column=source["column"],
-        seed=seed,
-        n_prompts=n_texts,
-    )
-
-    if source.get("index") is not None:
-        idx = source["index"]
-        texts = []
-        for item in raw_items:
-            if isinstance(item, (list, tuple)):
-                if idx < len(item):
-                    texts.append(str(item[idx]))
-                else:
-                    raise ValueError(
-                        f"Column '{source['column']}' item has {len(item)} elements, "
-                        f"requested index {idx}"
-                    )
-            else:
-                texts.append(str(item))
-        return texts
-
-    return [str(item) for item in raw_items]
 
 
 # ---------------------------------------------------------------------------
@@ -529,7 +435,7 @@ def main():
         if flag_value is None:
             continue
 
-        source = _parse_text_source(flag_value)
+        source = parse_text_source(flag_value)
         texts = load_texts(source, seed=args.seed, n_texts=n_texts)
 
         if not texts:
@@ -537,7 +443,7 @@ def main():
             continue
 
         conditions[condition_name] = texts
-        source_descriptions[condition_name] = _source_description(source)
+        source_descriptions[condition_name] = source_description(source)
         print(f"Loaded {len(texts)} texts for '{condition_name}' from {source_descriptions[condition_name]}")
 
     if not conditions:
