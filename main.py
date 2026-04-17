@@ -271,7 +271,7 @@ def main():
         print(f"Warning: Failed to initialize generations.txt: {e}")
     
     # Initialize per-generation outputs DataFrame (only full-length generations will be recorded)
-    generations_columns = ["codeword", "watermark", "decoded_codeword", "retrieved_watermark", "successful_watermark", "distance", "generated_token_ids", "decoded_token_ids", "generated_text"]
+    generations_columns = ["prompt_text", "codeword", "watermark", "decoded_codeword", "retrieved_watermark", "successful_watermark", "distance", "generated_token_ids", "decoded_token_ids", "generated_text"]
     generations_df = pd.DataFrame(columns=generations_columns)
 
     #----------------------------------------#
@@ -513,6 +513,7 @@ def main():
             # Collect data for batch search after generation completes
             pending_searches.append({
                 'prompt_idx': prompt_idx,
+                'prompt_text': prompt,
                 'codeword': codeword,
                 'watermark_identity': watermark_identity,
                 'decoded_codeword': decoded_codeword,
@@ -544,6 +545,7 @@ def main():
 
             # Record in DataFrame
             generations_df.loc[len(generations_df)] = {
+                "prompt_text": prompt,
                 "codeword": codeword_str,
                 "watermark": int(watermark_identity),
                 "decoded_codeword": decoded_codeword_str,
@@ -632,6 +634,7 @@ def main():
                 successful_search_distances.append(search_distance)
 
             generations_df.loc[len(generations_df)] = {
+                "prompt_text": ps['prompt_text'],
                 "codeword": codeword_str,
                 "watermark": int(watermark_identity),
                 "decoded_codeword": decoded_codeword_str,
