@@ -286,17 +286,30 @@ class OpenAICompatibleBackend(JudgeBackend):
 class LocalHFBackend(JudgeBackend):
     def __init__(self, model: str, load_in_4bit: bool = False, load_in_8bit: bool = False):
         import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer
+        from transformers import AutoConfig, AutoTokenizer, BitsAndBytesConfig
 
         self.tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
+
+        config = AutoConfig.from_pretrained(model, trust_remote_code=True)
+        architectures = getattr(config, "architectures", []) or []
+        is_multimodal = any("ConditionalGeneration" in arch for arch in architectures)
+
         kwargs = {"torch_dtype": "auto"}
         if load_in_4bit:
-            kwargs["load_in_4bit"] = True
+            kwargs["quantization_config"] = BitsAndBytesConfig(load_in_4bit=True)
+            kwargs["device_map"] = "auto"
         elif load_in_8bit:
-            kwargs["load_in_8bit"] = True
+            kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+            kwargs["device_map"] = "auto"
         else:
             kwargs["device_map"] = "auto"
-        self.model = AutoModelForCausalLM.from_pretrained(model, trust_remote_code=True, **kwargs)
+
+        if is_multimodal:
+            from transformers import AutoModelForImageTextToText
+            self.model = AutoModelForImageTextToText.from_pretrained(model, trust_remote_code=True, **kwargs)
+        else:
+            from transformers import AutoModelForCausalLM
+            self.model = AutoModelForCausalLM.from_pretrained(model, trust_remote_code=True, **kwargs)
         self.device = next(self.model.parameters()).device
 
     def judge(self, messages, temperature=0.0, max_tokens=1024):
