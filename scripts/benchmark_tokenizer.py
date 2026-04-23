@@ -31,7 +31,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import src.paths as paths
 from src.model_formatters import format_prompt_for_model
-from src.utils import get_shuffled_essays
+from src.utils import get_shuffled_essays, get_shuffled_texts, load_local_texts
 
 
 def check_token_consistency(tokenizer, generated_ids: list[int]) -> bool:
@@ -118,9 +118,9 @@ def gpu_worker(config: dict, batch_items: list[tuple[int, str]], results_queue: 
 def main():
     parser = argparse.ArgumentParser(description="Benchmark TI consistency check overhead")
     parser.add_argument("--model", type=str, default="facebook/opt-125m", help="Model to use")
-    parser.add_argument("--dataset", type=str, nargs=4,
+    parser.add_argument("--dataset", type=str, nargs='+',
                         default=["ChristophSchuhmann/essays-with-instructions", "default", "train", "instructions"],
-                        help="HuggingFace dataset: '<name>' '<subset>' '<split>' '<column>'")
+                        help="Text source: local file (.json/.txt) or HF dataset (4 args: '<name>' '<subset>' '<split>' '<column>')")
     parser.add_argument("--n-prompts", type=str, default="1", help="Number of prompts, or 'all'")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--max-tokens", type=int, default=100, help="Tokens to generate per prompt")
@@ -143,17 +143,37 @@ def main():
         num_gpus = available if args.num_gpus == 0 else min(args.num_gpus, available)
 
     # Load prompts
-    prompts = get_shuffled_essays(
-        dataset_name=args.dataset[0],
-        dataset_subset=args.dataset[1],
-        dataset_split=args.dataset[2],
-        dataset_column=args.dataset[3],
-        seed=args.seed,
-        n_prompts=n_prompts,
-    )
+    if len(args.dataset) == 1:
+        path = args.dataset[0]
+        ext = os.path.splitext(path)[1].lower()
+        if ext in (".json", ".txt"):
+            texts = load_local_texts(path)
+            prompts = get_shuffled_texts(texts, args.seed, n_prompts)
+        else:
+            parser.error(
+                f"'{path}' is not a supported file. Use a .json or .txt file, "
+                f"or provide 4 arguments for a HuggingFace dataset."
+            )
+    elif len(args.dataset) == 4:
+        prompts = get_shuffled_essays(
+            dataset_name=args.dataset[0],
+            dataset_subset=args.dataset[1],
+            dataset_split=args.dataset[2],
+            dataset_column=args.dataset[3],
+            seed=args.seed,
+            n_prompts=n_prompts,
+        )
+    else:
+        parser.error(
+            "--dataset must be a .json/.txt file (1 arg) or a HuggingFace dataset (4 args: name subset split column)."
+        )
 
     device_str = f"{num_gpus} GPU(s)" if num_gpus > 0 else "CPU"
     print(f"Model: {args.model}")
+    if len(args.dataset) == 1:
+        print(f"Source: file: {args.dataset[0]}")
+    else:
+        print(f"Source: dataset: {args.dataset[0]}")
     print(f"Prompts: {len(prompts)}, Max tokens: {args.max_tokens}, Device: {device_str}")
     print()
 
@@ -229,7 +249,7 @@ def main():
     lines = [
         "=" * 50,
         f"Model:               {args.model}",
-        f"Dataset:             {args.dataset[0]}",
+        f"Source:              {'file: ' + args.dataset[0] if len(args.dataset) == 1 else 'dataset: ' + args.dataset[0]}",
         f"Generations:         {len(prompts)}",
         f"Tokens/generation:   {args.max_tokens}",
         f"Total tokens:        {total_tokens}",

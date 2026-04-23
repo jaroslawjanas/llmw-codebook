@@ -163,6 +163,15 @@ def parse_text_source(args_list: list[str]) -> dict:
     if len(args_list) == 1 and os.path.isdir(args_list[0]):
         return {"type": "directory", "path": args_list[0]}
 
+    if len(args_list) == 1 and os.path.isfile(args_list[0]):
+        ext = os.path.splitext(args_list[0])[1].lower()
+        if ext in (".json", ".txt"):
+            return {"type": "file", "path": os.path.abspath(args_list[0]), "format": ext[1:]}
+        raise ValueError(
+            f"File '{args_list[0]}' has unsupported extension '{ext}'. "
+            f"Only .json and .txt are supported for local text files."
+        )
+
     if len(args_list) == 4:
         name, subset, split, column = args_list
         col_index = None
@@ -181,11 +190,11 @@ def parse_text_source(args_list: list[str]) -> dict:
 
     if len(args_list) == 1:
         raise ValueError(
-            f"'{args_list[0]}' is not an existing directory, and a HuggingFace "
-            f"dataset requires exactly 4 arguments: name subset split column"
+            f"'{args_list[0]}' is not a supported source. Expected: a directory, "
+            f"a .json/.txt file, or a HuggingFace dataset (4 args: name subset split column)."
         )
     raise ValueError(
-        f"Expected 1 arg (directory) or 4 args (dataset name subset split column), "
+        f"Expected 1 arg (file/directory) or 4 args (dataset name subset split column), "
         f"got {len(args_list)}: {args_list}"
     )
 
@@ -194,6 +203,8 @@ def source_description(source: dict) -> str:
     """Human-readable description of a text source."""
     if source["type"] == "directory":
         return f"dir: {source['path']}"
+    if source["type"] == "file":
+        return f"file: {source['path']} ({source['format']})"
     col_desc = source["column"]
     if source.get("index") is not None:
         col_desc += f"[{source['index']}]"
@@ -201,8 +212,8 @@ def source_description(source: dict) -> str:
 
 
 def load_texts(source: dict, seed: int, n_texts: int | None = None) -> list[str]:
-    """Load texts from either an experiment directory or HuggingFace dataset."""
-    from src.utils import get_shuffled_essays
+    """Load texts from an experiment directory, HuggingFace dataset, or local file."""
+    from src.utils import get_shuffled_essays, get_shuffled_texts, load_local_texts
 
     if source["type"] == "directory":
         experiment = load_experiment(source["path"])
@@ -212,6 +223,10 @@ def load_texts(source: dict, seed: int, n_texts: int | None = None) -> list[str]
         if n_texts is not None:
             texts = texts[:n_texts]
         return texts
+
+    if source["type"] == "file":
+        texts = load_local_texts(source["path"])
+        return get_shuffled_texts(texts, seed, n_texts)
 
     raw_items = get_shuffled_essays(
         dataset_name=source["name"],

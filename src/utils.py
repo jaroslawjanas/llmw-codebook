@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import random
@@ -62,22 +63,8 @@ def get_shuffled_essays(
         
     total_prompts_in_dataset = len(dataset[dataset_split])
 
-    if n_prompts is None:
-        n_prompts = total_prompts_in_dataset
-    elif n_prompts > total_prompts_in_dataset:
-        raise ValueError(f"Requested {n_prompts} prompts but dataset '{dataset_name}' "
-                         f"({dataset_subset} subset, {dataset_split} split) only contains {total_prompts_in_dataset} entries.")
-    
-    # Create a list of indices and shuffle them
-    prompt_indices = list(range(total_prompts_in_dataset))
-    random.shuffle(prompt_indices)
-    
-    # Get the first n_prompts indices
-    selected_indices = prompt_indices[:n_prompts]
-    
-    # Extract the prompts
-    prompts = []
-    for idx in selected_indices:
+    all_texts = []
+    for idx in range(total_prompts_in_dataset):
         prompt_data = dataset[dataset_split][idx]
         try:
             prompt_text = prompt_data[dataset_column]
@@ -86,6 +73,94 @@ def get_shuffled_essays(
                              f"Available columns: {list(prompt_data.keys())}")
         if not prompt_text:
             raise ValueError(f"No text found in dataset entry at index {idx} for column '{dataset_column}' in split '{dataset_split}'.")
-        prompts.append(prompt_text)
-    
-    return prompts
+        all_texts.append(prompt_text)
+
+    return get_shuffled_texts(all_texts, seed, n_prompts)
+
+
+def get_shuffled_texts(
+    texts: List[str],
+    seed: int,
+    n_texts: Optional[int] = None
+) -> List[str]:
+    """
+    Deterministically shuffle a list of texts and return a subset.
+
+    Args:
+        texts: Pre-loaded list of text strings.
+        seed: Random seed for reproducible shuffling.
+        n_texts: Number of texts to return. If None, returns all.
+
+    Returns:
+        Shuffled subset of texts.
+
+    Raises:
+        ValueError: If n_texts exceeds len(texts).
+    """
+    random.seed(seed)
+
+    total = len(texts)
+    if n_texts is None:
+        n_texts = total
+    elif n_texts > total:
+        raise ValueError(f"Requested {n_texts} texts but only {total} are available.")
+
+    indices = list(range(total))
+    random.shuffle(indices)
+    selected = indices[:n_texts]
+
+    return [texts[i] for i in selected]
+
+
+def load_local_texts(path: str) -> List[str]:
+    """
+    Load prompts from a local JSON or TXT file.
+
+    Args:
+        path: File path. Must end in .json or .txt.
+
+    Returns:
+        List of prompt strings.
+
+    Raises:
+        ValueError: If file extension is unsupported, JSON is not a list, or file is empty.
+    """
+    ext = os.path.splitext(path)[1].lower()
+
+    if ext == ".json":
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if not isinstance(data, list):
+            raise ValueError(
+                f"JSON file '{path}' must contain a top-level array (list of strings). "
+                f"Got {type(data).__name__}."
+            )
+
+        texts = [str(item) for item in data]
+
+        if not texts:
+            raise ValueError(f"JSON file '{path}' is an empty array.")
+
+        return texts
+
+    elif ext == ".txt":
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+        texts = []
+        for line in lines:
+            stripped = line.rstrip("\n")
+            if stripped.strip():
+                texts.append(stripped)
+
+        if not texts:
+            raise ValueError(f"TXT file '{path}' contains no non-empty lines.")
+
+        return texts
+
+    else:
+        raise ValueError(
+            f"Unsupported file extension '{ext}' for '{path}'. "
+            f"Only .json and .txt are supported."
+        )

@@ -11,7 +11,7 @@ from datetime import datetime
 from multiprocessing import Process, Queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import src.paths as paths
-from src.utils import get_shuffled_essays
+from src.utils import get_shuffled_essays, get_shuffled_texts, load_local_texts
 from src.llm_watermark import LLMWatermarkEncoder, LLMWatermarkDecoder
 from src.codebooks import CodebookBase, CodebookHamming, CodebookLevenshtein, CodebookLevenshteinTriton, RNGCodewordGenerator, BCHCodewordGenerator, LinearCodeGenerator
 from tqdm import tqdm
@@ -82,8 +82,9 @@ def main():
     parser.add_argument("--distance", type=str, choices=["hamming", "levenshtein", "levenshtein-triton"], default="hamming", help="Distance metric for codebook search")
     parser.add_argument("--bch-m", type=int, default=None, help="BCH field degree m (n0=2^m-1). If None, auto-select optimal")
     parser.add_argument("--prompt", type=str, help="Custom prompt (uses random essay from dataset if not provided)")
-    parser.add_argument("--dataset", type=str, nargs=4, default=["ChristophSchuhmann/essays-with-instructions", "default", "train", "instructions"], 
-                        help="Hugging Face dataset to use for prompts. Format: '<org>/<dataset name>' '<subset>' '<split>' '<column>'. Default: 'ChristophSchuhmann/essays-with-instructions' 'default' 'train' 'instructions'")
+    parser.add_argument("--dataset", type=str, nargs='+',
+                        default=["ChristophSchuhmann/essays-with-instructions", "default", "train", "instructions"],
+                        help="Text source for prompts. Either a local file (.json or .txt) or a HuggingFace dataset (4 args: '<name>' '<subset>' '<split>' '<column>'). Default: 'ChristophSchuhmann/essays-with-instructions' 'default' 'train' 'instructions'")
     parser.add_argument("--cache-dir", type=str, default=paths.CACHE_DIR, help="Cache directory for models and datasets")
     parser.add_argument("--no-cuda", action="store_true", help="Disable CUDA even if available")
     parser.add_argument("--context-window", type=int, default=1500, help="Maximum number of tokens to use as context for generation (default: 1500)")
@@ -168,12 +169,6 @@ def main():
 
     print(f"Using secret key: {args.secret_key}\n")
 
-    # Get dataset info
-    dataset_name = args.dataset[0]
-    dataset_subset = args.dataset[1]
-    dataset_split = args.dataset[2]
-    dataset_column = args.dataset[3]
-
     # Parse --n-prompts: "all" or integer
     if args.n_prompts.lower() == "all":
         n_prompts = None
@@ -185,34 +180,65 @@ def main():
         if n_prompts < 1:
             parser.error(f"--n-prompts must be a positive integer or 'all', got '{args.n_prompts}'")
 
-    # Get prompts
+    # Resolve prompts
     if args.prompt:
         # Single custom prompt
         prompts = [args.prompt]
+        dataset_name = ""
+        dataset_subset = ""
+        dataset_split = ""
+        dataset_column = ""
         if args.verbose:
             print(f"\n--- Using Custom Prompt ---")
             print(args.prompt[:200] + "..." if len(args.prompt) > 200 else args.prompt)
             print("---------------------------\n")
-
-    else:
-        # Get shuffled essays from dataset
+    elif len(args.dataset) == 1:
+        path = args.dataset[0]
+        ext = os.path.splitext(path)[1].lower()
+        if ext in (".json", ".txt"):
+            texts = load_local_texts(path)
+            prompts = get_shuffled_texts(texts, args.seed, n_prompts)
+            dataset_name = os.path.splitext(os.path.basename(path))[0]
+            dataset_subset = ""
+            dataset_split = ""
+            dataset_column = ""
+            if args.verbose:
+                print(f"\n--- Prompt from file: {path} ---")
+                print(prompts[0][:200] + "..." if len(prompts[0]) > 200 else prompts[0])
+                print(f"{'='*60}\n")
+        else:
+            parser.error(
+                f"'{path}' is not a supported file. Use a .json or .txt file, "
+                f"or provide 4 arguments for a HuggingFace dataset."
+            )
+    elif len(args.dataset) == 4:
+        dataset_name, dataset_subset, dataset_split, dataset_column = args.dataset
         prompts = get_shuffled_essays(
             dataset_name=dataset_name,
             dataset_subset=dataset_subset,
             dataset_split=dataset_split,
             dataset_column=dataset_column,
             seed=args.seed,
-            n_prompts=n_prompts
+            n_prompts=n_prompts,
         )
         if args.verbose:
             print(f"\n--- Prompt from {dataset_name}/{dataset_subset} ({dataset_split} split, {dataset_column} column) ---")
             print(prompts[0][:200] + "..." if len(prompts[0]) > 200 else prompts[0])
             print(f"{'='*60}\n")
+    else:
+        parser.error(
+            "--dataset must be a .json/.txt file (1 arg) or a HuggingFace dataset (4 args: name subset split column)."
+        )
     
     total_prompts = len(prompts)
     if args.verbose:
         print(f"Generating {args.u} tokens per prompt with watermarking...")
-        print(f"Using dataset: {dataset_name}")
+        if args.prompt:
+            print(f"Using prompt: custom")
+        elif len(args.dataset) == 1:
+            print(f"Using file: {args.dataset[0]}")
+        else:
+            print(f"Using dataset: {dataset_name}")
         print(f"Processing {total_prompts} prompt(s) with model: {args.model}")
 
     # Create dynamic output directory and file path
@@ -665,7 +691,12 @@ def main():
         f.write("EXPERIMENT PARAMETERS\n")
         f.write("=" * 60 + "\n")
         f.write(f"Model: {args.model}\n")
-        f.write(f"Dataset: {dataset_name}/{dataset_subset} ({dataset_split} split, {dataset_column} column)\n")
+        if args.prompt:
+            f.write(f"Dataset: custom prompt\n")
+        elif len(args.dataset) == 1:
+            f.write(f"Dataset: file: {args.dataset[0]}\n")
+        else:
+            f.write(f"Dataset: {dataset_name}/{dataset_subset} ({dataset_split} split, {dataset_column} column)\n")
         f.write(f"n (code table size): {args.n}\n")
         f.write(f"u (code size): {args.u}\n")
         f.write(f"Number of prompts: {total_prompts}\n")
