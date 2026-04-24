@@ -127,6 +127,26 @@ DIMENSIONS = {
             5: "Excellent quality across all dimensions",
         },
     },
+    "generic_authenticity": {
+        "description": "how believable the text is as genuine human-written text in general",
+        "rubric": {
+            1: "Clearly synthetic or AI-generated, reads nothing like a real person wrote it",
+            2: "Mostly artificial, has obvious giveaways that it is machine-generated",
+            3: "Somewhat believable but with notable signs of being generated or generic",
+            4: "Mostly authentic, reads like a real person with minor oddities",
+            5: "Indistinguishable from genuine human-written text",
+        },
+    },
+    "social_authenticity": {
+        "description": "how believable the text is as a genuine human-written product review or social media post",
+        "rubric": {
+            1: "Clearly synthetic or AI-generated, sounds nothing like a real user review or post",
+            2: "Mostly artificial, has obvious giveaways that it is not from a real person",
+            3: "Somewhat believable but with notable signs of being generated or generic",
+            4: "Mostly authentic, reads like a real person with minor oddities",
+            5: "Indistinguishable from a genuine human product review or social media post",
+        },
+    },
 }
 
 _RATING_RE = re.compile(r"\[\[(\d+)\]\]")
