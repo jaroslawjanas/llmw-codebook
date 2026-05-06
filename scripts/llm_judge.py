@@ -129,20 +129,25 @@ class JudgeBackend(ABC):
 
 
 class OpenAICompatibleBackend(JudgeBackend):
-    def __init__(self, model: str, api_key: str, base_url: str | None = None):
+    def __init__(self, model: str, api_key: str, base_url: str | None = None, provider: str | None = None):
         from openai import OpenAI
         kwargs = {"api_key": api_key}
         if base_url:
             kwargs["base_url"] = base_url
         self.client = OpenAI(**kwargs)
         self.model = model
+        self.provider = provider
 
     def judge(self, messages, temperature=0.0, max_tokens=1024):
+        extra_body = {}
+        if self.provider:
+            extra_body["provider"] = {"order": [self.provider]}
         response = self.client.chat.completions.create(
             model=self.model,
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
+            extra_body=extra_body if extra_body else None,
         )
         text = response.choices[0].message.content or ""
         inp = getattr(response.usage, "prompt_tokens", 0) or 0
@@ -604,6 +609,10 @@ def parse_args() -> argparse.Namespace:
         help="OpenAI-compatible API base URL (e.g., https://openrouter.ai/api/v1)",
     )
     parser.add_argument(
+        "--provider", type=str, default=None,
+        help="OpenRouter provider to route to (e.g., Parasail, Novita, Together)",
+    )
+    parser.add_argument(
         "--judge-temperature", type=float, default=0.0,
         help="Judge temperature (default: 0.0 for deterministic judging)",
     )
@@ -722,7 +731,7 @@ def main():
         if not api_key:
             print("Error: --api-key or OPENROUTER_API_KEY/OPENAI_API_KEY env var required for openai backend")
             sys.exit(1)
-        backend = OpenAICompatibleBackend(args.judge_model, api_key, args.api_base_url)
+        backend = OpenAICompatibleBackend(args.judge_model, api_key, args.api_base_url, args.provider)
     elif args.judge_backend == "local":
         backend = LocalHFBackend(args.judge_model, args.load_in_4bit, args.load_in_8bit)
     else:
