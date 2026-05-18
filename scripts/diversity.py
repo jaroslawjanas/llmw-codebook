@@ -166,10 +166,10 @@ def _fmt(v) -> str:
 _CONDITION_ORDER = ["human", "no_watermark", "watermarked"]
 _CONDITION_LABELS = {
     "human": "Human",
-    "no_watermark": "No Watermark",
+    "no_watermark": "Not Watermarked",
     "watermarked": "Watermarked",
 }
-_COLORS = ["#4DAF4A", "#377EB8", "#E41A1C"]
+_COLORS = ["#4DAF4A", "#4DAF4A", "#377EB8"]
 
 
 def _plot_results(condition_results: dict[str, list[dict]], run_dir: str) -> str | None:
@@ -251,7 +251,7 @@ def _output_results(
     metrics = [
         ("distinct_1", "Distinct-1 (unique unigrams / total unigrams; higher = more diverse)"),
         ("distinct_2", "Distinct-2 (unique bigrams / total bigrams; higher = more diverse)"),
-        ("repeated_trigram_ratio", "Repeated Trigram Ratio (1 − unique/total trigrams; lower = less repetitive)"),
+        ("repeated_trigram_ratio", "Trigram Repetition Rate (1 - unique/total trigrams; lower = less repetitive)"),
     ]
 
     summary_records = []
