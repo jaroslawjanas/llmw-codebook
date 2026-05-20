@@ -40,7 +40,6 @@ from scripts.utils import (
     create_triton_codebooks,
     discover_experiments,
     load_and_merge,
-    multi_gpu_triton_batch_search,
     resolve_triton_gpu_count,
 )
 from src.codebooks import (
@@ -51,6 +50,7 @@ from src.codebooks import (
     LinearCodeGenerator,
     RNGCodewordGenerator,
 )
+from scripts.utils.negative_generation import load_or_generate_negatives
 
 
 def sanitize_filename(name: str) -> str:
@@ -61,132 +61,6 @@ def sanitize_filename(name: str) -> str:
 def shorten_model_name(name: str) -> str:
     """Extract short model name from canonical HuggingFace name (last component after /)."""
     return name.split("/")[-1] if "/" in name else name
-
-
-# ---------------------------------------------------------------------------
-# Negative distance generation + caching
-# ---------------------------------------------------------------------------
-
-def _build_cache_basename(args: argparse.Namespace) -> str:
-    """Build a deterministic cache filename base from params (no extension)."""
-    sk_clean = sanitize_filename(args.secret_key)
-    distance = args.distance.replace("-triton", "")
-    parts = [
-        "fpr_negatives",
-        f"c-{args.codebook_generation}",
-        f"n{args.n}",
-        f"u{args.u}",
-        f"z{args.z}",
-        f"seed{args.seed}",
-        f"sk-{sk_clean}",
-        distance,
-    ]
-    if args.codebook_generation == "bch":
-        m_tag = "auto" if args.bch_m is None else str(args.bch_m)
-        parts.append(f"bchm{m_tag}")
-    return "_".join(parts)
-
-
-def _build_cache_config(args: argparse.Namespace) -> dict:
-    """Build the config dict stored alongside the cached NPZ."""
-    return {
-        "n": args.n,
-        "u": args.u,
-        "z": args.z,
-        "seed": args.seed,
-        "secret_key": args.secret_key,
-        "codebook_generation": args.codebook_generation,
-        "distance": args.distance,
-        "bch_m": args.bch_m,
-    }
-
-
-def _validate_cache_config(cached: dict, current: dict) -> bool:
-    """Check that all fields in current match cached."""
-    for key in current:
-        if cached.get(key) != current[key]:
-            return False
-    return True
-
-
-def load_or_generate_negatives(
-    args: argparse.Namespace, codebook, codebooks: list | None = None,
-) -> np.ndarray:
-    """Load cached negative distances or generate and cache them."""
-    os.makedirs(paths.SCRIPTS_CACHE_DIR, exist_ok=True)
-
-    basename = _build_cache_basename(args)
-    npz_path = os.path.join(paths.SCRIPTS_CACHE_DIR, f"{basename}.npz")
-    json_path = os.path.join(paths.SCRIPTS_CACHE_DIR, f"{basename}.json")
-    current_config = _build_cache_config(args)
-
-    # Try loading from cache
-    if os.path.isfile(npz_path) and os.path.isfile(json_path):
-        try:
-            with open(json_path, "r", encoding="utf-8") as f:
-                cached_config = json.load(f)
-            if _validate_cache_config(cached_config, current_config):
-                with np.load(npz_path) as data:
-                    distances = data["distances"]
-                if len(distances) == args.z:
-                    print(f"Loaded negative distances from cache: {npz_path}")
-                    return distances.astype(np.int32, copy=False)
-        except Exception:
-            pass  # Fall through to generation
-
-    # Generate from scratch
-    print(f"Generating {args.z} negative distances (distance={args.distance}, codebook={args.codebook_generation})...")
-    distances = _generate_negative_distances(
-        codebook, args.z, args.u, args.seed, args.verbose, codebooks=codebooks,
-    )
-
-    # Save cache
-    try:
-        np.savez_compressed(npz_path, distances=distances.astype(np.int32, copy=False))
-        config_to_save = {**current_config, "timestamp": datetime.now().isoformat()}
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(config_to_save, f, indent=2)
-        print(f"Saved negative distances cache: {npz_path}")
-    except Exception as e:
-        print(f"Warning: failed to save cache: {e}")
-
-    return distances
-
-
-def _generate_negative_distances(
-    codebook, z: int, u: int, seed: int, verbose: bool,
-    codebooks: list | None = None,
-) -> np.ndarray:
-    """Generate z random bit sequences and find closest codebook match for each.
-
-    For Hamming (Faiss), uses batch search for speed.
-    For Levenshtein (Numba/Triton), uses batch search for speed.
-    When codebooks (list of Triton instances) is provided, uses multi-GPU search.
-    """
-    rng = np.random.default_rng(seed)
-
-    if isinstance(codebook, CodebookHamming):
-        # Batch Faiss search: generate all random bits, pack, and search in one call
-        if verbose:
-            print(f"Generating {z} random bit sequences...")
-        random_bits = rng.integers(0, 2, size=(z, u), dtype=np.uint8)
-        queries = CodebookBase._pack_bits_2d(random_bits, u)
-        if verbose:
-            print(f"Running batch Faiss search over {z} queries...")
-        distances_arr, _ = codebook.index.search(queries, 1)
-        return distances_arr[:, 0].astype(np.int32)
-    else:
-        # Levenshtein: batch search (multi-GPU when available)
-        if verbose:
-            print(f"Generating {z} random bit sequences...")
-        random_bits = rng.integers(0, 2, size=(z, u), dtype=np.uint8)
-        if verbose:
-            print(f"Running batch Levenshtein search over {z} queries...")
-        if codebooks and len(codebooks) > 1:
-            return multi_gpu_triton_batch_search(
-                codebooks, random_bits, distances_only=True,
-            ).astype(np.int32)
-        return codebook.find_closest_match_batch(random_bits, distances_only=True).astype(np.int32)
 
 
 # ---------------------------------------------------------------------------
@@ -593,7 +467,19 @@ def main():
         codebook = CodebookLevenshtein(base_codebook)
 
     # Step 1: Generate or load negative distances
-    neg_distances = load_or_generate_negatives(args, codebook, codebooks=codebooks)
+    print(f"Generating {args.z} negative distances (distance={args.distance}, codebook={args.codebook_generation})...")
+    neg_distances = load_or_generate_negatives(
+        prefix="negative_distances",
+        n=args.n,
+        u=args.u,
+        secret_key=args.secret_key,
+        codeword_generation=args.codebook_generation,
+        distance=args.distance,
+        bch_m=args.bch_m,
+        z=args.z,
+        seed=args.seed,
+        num_gpus=args.num_gpus,
+    )
     if args.verbose:
         print(f"Negative distances: {len(neg_distances)} samples, range [{neg_distances.min()}, {neg_distances.max()}]")
 

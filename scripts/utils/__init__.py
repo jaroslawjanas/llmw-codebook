@@ -8,6 +8,10 @@ from .loading import (
     parse_text_source,
     source_description,
 )
+from .negative_generation import (
+    generate_negative_distances,
+    load_or_generate_negatives,
+)
 from .search import (
     create_triton_codebooks,
     multi_gpu_triton_batch_search,
@@ -21,6 +25,8 @@ __all__ = [
     "load_texts",
     "parse_text_source",
     "source_description",
+    "generate_negative_distances",
+    "load_or_generate_negatives",
     "create_triton_codebooks",
     "multi_gpu_triton_batch_search",
     "resolve_triton_gpu_count",
